@@ -635,6 +635,7 @@ class LymphMixture(
             with np.errstate(invalid="ignore"):
                 final_llh = resps * llhs
             final_llh[np.isnan(final_llh)] = 0
+            final_llh[np.isinf(final_llh)] = 0
             return np.sum(final_llh)
         return np.prod(llhs**resps)
 
