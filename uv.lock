@@ -634,7 +634,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "emcee" },
-    { name = "lymph-model", specifier = ">=1.2" },
+    { name = "lymph-model", editable = "../lymph" },
     { name = "myst-nb", marker = "extra == 'docs'" },
     { name = "numpy" },
     { name = "pandas" },
@@ -648,17 +648,33 @@ provides-extras = ["test", "docs"]
 
 [[package]]
 name = "lymph-model"
-version = "1.3.3"
-source = { registry = "https://pypi.org/simple" }
+source = { editable = "../lymph" }
 dependencies = [
     { name = "cachetools" },
     { name = "numpy" },
     { name = "pandas" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/46/49/8d5fd7f65362e9db8b327a0c54be495305f1c39e0fcedbd99365f4d2615b/lymph_model-1.3.3.tar.gz", hash = "sha256:82313678fda4605b1696a93481272f1c684cfc9462c737c16a34ba1ab29850e3", size = 198374 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/c1/4f/59c19261a87f9bbf452519a142d4d695f0f648588a9a42011cacfcc2ae89/lymph_model-1.3.3-py3-none-any.whl", hash = "sha256:9e7b6740323d08fdd0bd839dd0ba12a02e9e6f5ffd536beb18d4fec093886b02", size = 64152 },
+
+[package.metadata]
+requires-dist = [
+    { name = "cachetools" },
+    { name = "coverage", marker = "extra == 'test'" },
+    { name = "emcee", marker = "extra == 'docs'" },
+    { name = "emcee", marker = "extra == 'test'" },
+    { name = "ipython", marker = "extra == 'docs'" },
+    { name = "matplotlib", marker = "extra == 'docs'" },
+    { name = "myst-nb", marker = "extra == 'docs'" },
+    { name = "numpy" },
+    { name = "pandas" },
+    { name = "pre-commit", marker = "extra == 'dev'" },
+    { name = "pytest", marker = "extra == 'test'" },
+    { name = "scipy", marker = "extra == 'docs'" },
+    { name = "scipy", marker = "extra == 'test'" },
+    { name = "sphinx", marker = "extra == 'docs'" },
+    { name = "sphinx-autodoc-typehints", marker = "extra == 'docs'" },
+    { name = "sphinx-book-theme", marker = "extra == 'docs'" },
 ]
+provides-extras = ["test", "dev", "docs"]
 
 [[package]]
 name = "markdown-it-py"

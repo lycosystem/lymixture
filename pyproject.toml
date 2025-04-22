@@ -13,9 +13,9 @@ dependencies = [
     "numpy",
     "scipy",
     "pandas",
-    "lymph-model >= 1.2",
     # I think these packages should not be depedencies...
     "emcee",
+    "lymph-model",
 ]
 dynamic = ["version"]
 
@@ -50,3 +50,11 @@ ignore = [
     "FIX002",
 ]
 exclude = ["*.ipynb", "tests/*"]
+
+[tool.uv.sources]
+lymph-model = { path = "../lymph", editable = true }
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    "ignore::pandas.errors.PerformanceWarning"
+]

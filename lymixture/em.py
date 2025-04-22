@@ -224,12 +224,6 @@ def sample_fixed_mixture(
         - The function initializes an :py:class:`emcee.EnsembleSampler` with a fixed
           mixture coefficient log-probability function (``log_prob_fn_fixed_mixture``)
           and uses multiprocessing to parallelize sampling.
-
-    Example:
-    >>> backend, chain = sample_fixed_mixture(
-    ...     my_model, steps=500, filename="my_fixed_mix.hdf5",
-    ... )
-
     """
     if latent is None:
         latent = model.get_resps()
@@ -289,12 +283,6 @@ def sample_model_params(
           updated based on the provided or computed latent parameters.
         - The function initializes an `emcee.EnsembleSampler` for MCMC sampling and
           uses a multiprocessing pool to parallelize the computations.
-
-    Example:
-        >>> backend, chain = sample_model_params(
-        ...     my_model, steps=500, filename="my_chain.hdf5",
-        ... )
-
     """
     latent = latent or model.get_resps()
 
@@ -374,11 +362,6 @@ def mh_latent_sampler_per_patient_2_component(
           the provided ``log_prob_fn``.
         - This function is designed for a full AIP algorithm but is not used
           due to long computation times.
-
-    Example:
-    >>> current_resps, current_log_prob = mh_sampler_per_patient(my_model, log_prob_fn)
-    >>> print("Log probability before sampling:", current_log_prob)
-
     """
     temp = temp or 0.5
     current_position = model.get_resps()
