@@ -626,6 +626,10 @@ class LymphMixture(
             component=component,
             log=log,
         )
+        if component is not None:
+            llhs[(np.isinf(llhs)) & (self.repeat_mixture_coefs()[:,component] == 0)] = 0
+        else:
+            llhs[(np.isinf(llhs)) & (self.repeat_mixture_coefs() == 0)] = 0
         resps = self.get_resps(
             t_stage=t_stage,
             subgroup=subgroup,
@@ -634,8 +638,8 @@ class LymphMixture(
         if log:
             with np.errstate(invalid="ignore"):
                 final_llh = resps * llhs
-            final_llh[np.isnan(final_llh)] = 0
-            final_llh[np.isinf(final_llh)] = 0
+            nan_condition = np.isnan(final_llh) & np.isinf(llhs) & (resps == 0)
+            final_llh[nan_condition] = 0
             return np.sum(final_llh)
         return np.prod(llhs**resps)
 
