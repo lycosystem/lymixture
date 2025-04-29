@@ -80,6 +80,19 @@ def normalize(
     return normalized / np.sum(normalized, axis=axis)
 
 
+def log_normalize(
+    log_values: np.ndarray,
+    axis: int,
+) -> np.ndarray:
+    """Log-normalize ``log_values`` to sum to 1 along ``axis``.
+
+    >>> log_norm = log_normalize(np.log([0.1, 0.2, 0.7]), axis=0)
+    >>> np.exp(np.logaddexp.reduce(log_norm, axis=0))   # doctest: +NORMALIZE_WHITESPACE
+    np.float64(1.0)
+    """
+    return log_values - np.logaddexp.reduce(log_values, axis=axis)
+
+
 def harden(values: np.ndarray, axis: int) -> np.ndarray:
     """Harden ``values`` to become a one-hot-encoding along the given ``axis``.
 

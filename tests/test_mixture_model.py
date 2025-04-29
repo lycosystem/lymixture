@@ -43,6 +43,15 @@ class TestMixtureModel(fixtures.MixtureModelFixture):
 
         self.assertEqual(total_num_patients, len(self.patient_data))
 
+    def test_responsibility_indices(self):
+        """Check if the returned index array is correct."""
+        self.assertTrue(
+            np.all(
+                self.mixture_model.get_resp_indices(subgroup="C09")
+                == (self.mixture_model.patient_data[fixtures.SIMPLE_SUBSITE] == "C09"),
+            )
+        )
+
     def test_set_responsibilities(self):
         """Test the assignment of responsibilities."""
         self.mixture_model.set_resps(self.resp)
@@ -66,7 +75,7 @@ class TestMixtureModel(fixtures.MixtureModelFixture):
         c_idx = self.rng.integers(low=0, high=self.num_components)
         self.assertEqual(
             self.resp[p_idx, c_idx],
-            self.mixture_model.get_resps(patient=p_idx, component=c_idx),
+            self.mixture_model.get_resps(component=c_idx).loc[p_idx],
         )
 
 

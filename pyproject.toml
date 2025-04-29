@@ -21,7 +21,13 @@ dynamic = ["version"]
 
 [project.optional-dependencies]
 test = ["pytest"]
-docs = ["sphinx", "sphinx-book-theme", "sphinx-autodoc-typehints", "myst-nb"]
+docs = [
+    "sphinx",
+    "sphinx-book-theme",
+    "sphinx-autodoc-typehints",
+    "myst-nb",
+    "matplotlib",
+]
 
 [tool.setuptools_scm]
 write_to = "lymixture/_version.py"
@@ -52,6 +58,4 @@ ignore = [
 exclude = ["*.ipynb", "tests/*"]
 
 [tool.pytest.ini_options]
-filterwarnings = [
-    "ignore::pandas.errors.PerformanceWarning"
-]
+filterwarnings = ["ignore::pandas.errors.PerformanceWarning"]
