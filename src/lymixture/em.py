@@ -61,16 +61,27 @@ def _set_params(model: models.LymphMixture, params: np.ndarray) -> None:
         params = np.array(params)
 
 
-def expectation(model: models.LymphMixture, params: dict[str, float]) -> np.ndarray:
+def expectation(
+    model: models.LymphMixture,
+    params: dict[str, float],
+    *,
+    log: bool = False,
+) -> np.ndarray:
     """Compute expected value of latent ``model`` variables given the ``params``.
 
     This marks the E-step of the famous `EM algorithm`_. The returned expected values
     are also often called responsibilities.
 
+    If ``log`` is set to ``True``, the function returns the logarithm of the
+    responsibilities.
+
     .. _EM algorithm: https://en.wikipedia.org/wiki/Expectation%E2%80%93maximization_algorithm
     """
     model.set_params(**params)
-    llhs = model.patient_mixture_likelihoods(log=False, marginalize=False)
+    llhs = model.patient_mixture_likelihoods(log=log, marginalize=False)
+    if log:
+        return utils.log_normalize(llhs.T, axis=0).T
+
     return utils.normalize(llhs.T, axis=0).T
 
 
@@ -107,7 +118,7 @@ def _neg_complete_component_llh(
 
 def maximization(
     model: models.LymphMixture,
-    latent: np.ndarray,
+    log_resps: np.ndarray,
 ) -> dict[str, float]:
     """Maximize ``model`` params given expectation of ``latent`` variables.
 
@@ -117,9 +128,9 @@ def maximization(
 
     .. _EM algorithm: https://en.wikipedia.org/wiki/Expectation%E2%80%93maximization_algorithm
     """
-    maximized_mixture_coefs = model.infer_mixture_coefs(new_resps=latent)
-    model.set_mixture_coefs(maximized_mixture_coefs)
-    model.normalize_mixture_coefs()
+    log_maxed_mix_coefs = model.infer_mixture_coefs(new_resps=log_resps, log=True)
+    log_maxed_mix_coefs = utils.log_normalize(log_maxed_mix_coefs, axis=0)
+    model.set_mixture_coefs(np.exp(log_maxed_mix_coefs))
 
     for i, component in enumerate(model.components):
         current_params = list(component.get_params(as_dict=False))
