@@ -281,6 +281,7 @@ class LymphMixture(
         *,
         as_dict: bool = True,
         as_flat: bool = True,
+        model_params_only: bool = False,
     ) -> Iterable[float] | dict[str, float]:
         """Get the parameters of the mixture model.
 
@@ -329,10 +330,11 @@ class LymphMixture(
             if not self.universal_p:
                 params[str(c)].update(component.get_distribution_params(as_flat=as_flat))
 
-            for label in self.subgroups:
-                params[str(c)].update(
-                    {f"{label}_coef": self.get_mixture_coefs(c, label)},
-                )
+            if not model_params_only:
+                for label in self.subgroups:
+                    params[str(c)].update(
+                        {f"{label}_coef": self.get_mixture_coefs(c, label)},
+                    )
         # Check if transmission parameters are the same for all components
         if self.shared_transmission:
             first_transmission = self.components[0].get_lnl_spread_params(as_flat=as_flat)

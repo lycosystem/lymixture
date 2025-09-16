@@ -115,10 +115,30 @@ def _neg_complete_component_llh(
     logger.debug(f"Component {component} with params {params} has llh {result}")
     return result
 
+def _neg_complete_component_llh_shared(
+    params: dict[str, float],
+    model: models.LymphMixture,
+) -> float:
+    """Return the negative complete log likelihood of ``component`` in ``model``.
+
+    This function is used in the M-step of the EM algorithm.
+    """
+    try:
+        params_dict = model.get_params(model_params_only=True)
+        params_dict_new = dict(zip(params_dict.keys(), params))
+        model.set_params(**params_dict_new)
+    except ValueError:
+        return np.inf
+
+    result = -model.complete_data_likelihood()
+    logger.debug(f"Mixture model with params {params} has llh {result}")
+    return result
+
 
 def maximization(
     model: models.LymphMixture,
     log_resps: np.ndarray,
+    shared_params: bool = False,
 ) -> dict[str, float]:
     """Maximize ``model`` params given expectation of ``latent`` variables.
 
@@ -131,15 +151,13 @@ def maximization(
     log_maxed_mix_coefs = model.infer_mixture_coefs(new_resps=log_resps, log=True)
     log_maxed_mix_coefs = utils.log_normalize(log_maxed_mix_coefs, axis=0)
     model.set_mixture_coefs(np.exp(log_maxed_mix_coefs))
-
-    for i, component in enumerate(model.components):
-        current_params = list(component.get_params(as_dict=False))
+    if shared_params:
+        current_params = list(model.get_params(as_dict=False, model_params_only=True))
         lb = np.zeros(shape=len(current_params))
         ub = np.ones(shape=len(current_params))
-
         result = opt.minimize(
-            fun=_neg_complete_component_llh,
-            args=(model, i),
+            fun=_neg_complete_component_llh_shared,
+            args=(model),
             x0=current_params,
             bounds=opt.Bounds(lb=lb, ub=ub),
             method="Powell",
@@ -147,10 +165,33 @@ def maximization(
         )
 
         if result.success:
-            component.set_params(*result.x)
+            params_dict = model.get_params(model_params_only=True)
+            params_dict_new = dict(zip(params_dict.keys(), result.x))
+            model.set_params(**params_dict_new)
         else:
             msg = f"Optimization failed: {result}"
             raise RuntimeError(msg)
+
+    else:
+        for i, component in enumerate(model.components):
+            current_params = list(component.get_params(as_dict=False))
+            lb = np.zeros(shape=len(current_params))
+            ub = np.ones(shape=len(current_params))
+
+            result = opt.minimize(
+                fun=_neg_complete_component_llh,
+                args=(model, i),
+                x0=current_params,
+                bounds=opt.Bounds(lb=lb, ub=ub),
+                method="Powell",
+                callback=init_callback(),
+            )
+
+            if result.success:
+                component.set_params(*result.x)
+            else:
+                msg = f"Optimization failed: {result}"
+                raise RuntimeError(msg)
 
     return model.get_params(as_dict=True)
 
