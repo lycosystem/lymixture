@@ -138,7 +138,6 @@ def _neg_complete_component_llh_shared(
 def maximization(
     model: models.LymphMixture,
     log_resps: np.ndarray,
-    shared_params: bool = False,
 ) -> dict[str, float]:
     """Maximize ``model`` params given expectation of ``latent`` variables.
 
@@ -151,7 +150,7 @@ def maximization(
     log_maxed_mix_coefs = model.infer_mixture_coefs(new_resps=log_resps, log=True)
     log_maxed_mix_coefs = utils.log_normalize(log_maxed_mix_coefs, axis=0)
     model.set_mixture_coefs(np.exp(log_maxed_mix_coefs))
-    if shared_params:
+    if model.shared_transmission or model.universal_p:
         current_params = list(model.get_params(as_dict=False, model_params_only=True))
         lb = np.zeros(shape=len(current_params))
         ub = np.ones(shape=len(current_params))

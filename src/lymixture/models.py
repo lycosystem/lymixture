@@ -560,6 +560,8 @@ class LymphMixture(
             modality_children=combined_dict,
             is_modality_leaf=False,
         )
+        t_stage_unique = self.patient_data[('tumor', '1', 't_stage')].unique()
+        self.t_stage_indices = {stage: self.patient_data[('tumor', '1', 't_stage')] == stage for stage in t_stage_unique}
 
     @property
     def patient_data(self) -> pd.DataFrame:
@@ -592,23 +594,13 @@ class LymphMixture(
         comp_idx = slice(None) if component is None else one_slice(component)
         components = self.components[comp_idx]
 
-        llhs = np.empty(shape=(0, len(components)))
-
-        for subgroup in subgroups:  # noqa: PLR1704
-            shape = (len(subgroup.patient_data), len(components))
-            sub_llhs = np.empty(shape=shape)
-
+        shape=(len(self.patient_data), len(components))
+        llhs = np.empty(shape)
+        for i, comp in enumerate(components):
             for t in t_stages:
-                # use the index to align the likelihoods with the patients
-                t_idx = subgroup.patient_data[T_STAGE_COL] == t
-                sub_llhs[t_idx] = np.stack(
-                    [  # TODO: Precompute the state-dists for better performance
-                        comp.state_dist(t) @ subgroup.diagnosis_matrix(t).T
-                        for comp in components
-                    ],
-                    axis=-1,
-                )
-            llhs = np.vstack([llhs, sub_llhs])
+                t_idx = self.t_stage_indices[t]
+                sub_llhs = comp.patient_likelihoods(t)
+                llhs[t_idx, i] = sub_llhs
 
         if component is not None:
             llhs = llhs[:, 0]
