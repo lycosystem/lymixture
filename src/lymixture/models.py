@@ -762,17 +762,17 @@ class LymphMixture(
         distribution is computed for all subgroups. The result is a matrix with shape
         ``(num_subgroups, num_states)``.
         """
-        comp_state_dist_size = len(self.components[0].state_dist(t_stage))
-        comp_state_dists = np.zeros((len(self.components), comp_state_dist_size))
+        comp_state_dist_size = self.components[0].state_dist(t_stage).shape
+        comp_state_dists = np.zeros((len(self.components), *comp_state_dist_size))
         for i, component in enumerate(self.components):
             comp_state_dists[i] = component.state_dist(t_stage)
 
         if subgroup is not None:
-            state_dist = self.get_mixture_coefs(subgroup=subgroup) @ comp_state_dists
+            state_dist = np.tensordot(self.get_mixture_coefs(subgroup=subgroup), comp_state_dists, axes=1)
         else:
-            state_dist = np.zeros((len(self.subgroups), comp_state_dist_size))
+            state_dist = np.zeros((len(self.subgroups), *comp_state_dist_size))
             for i, mixer in enumerate(self._mixture_coefs.items()):
-                state_dist[i] = mixer[1] @ comp_state_dists
+                state_dist[i] = np.tensordot(mixer[1], comp_state_dists, axes=1)
 
         return state_dist
 
@@ -783,6 +783,8 @@ class LymphMixture(
         given_state_dist: np.ndarray | None = None,
         given_diagnosis: types.DiagnosisType | None = None,
         t_stage: str | int = "early",
+        midext: bool = None,
+        central: bool = None,
     ) -> np.ndarray:
         """Compute the posterior distribution over hidden states given a diagnosis.
 
@@ -799,16 +801,36 @@ class LymphMixture(
         The ``t_stage`` parameter determines the T-stage for which the posterior is
         computed.
         """
-        if given_state_dist is None:
-            # in contrast to when computing the likelihood, we do want to raise an error
-            # here if the parameters are invalid, since we want to know if the user
-            # provided invalid parameters.
-            if given_params is not None:
-                if isinstance(given_params, dict):
-                    self.set_params(**given_params)
-                else:
-                    self.set_params(*given_params)
-            given_state_dist = self.state_dist(t_stage, subgroup)
+        # in contrast to when computing the likelihood, we do want to raise an error
+        # here if the parameters are invalid, since we want to know if the user
+        # provided invalid parameters.
+        if given_params is not None:
+            if isinstance(given_params, dict):
+                self.set_params(**given_params)
+            else:
+                self.set_params(*given_params)
+        if type(self.components[0]) == lymph.models.Midline:
+            given_state_dist = self.state_dist(
+                    t_stage=t_stage, subgroup=subgroup
+                )
+            if given_state_dist.ndim == 2: #figure out what this is and whether we need it. THIS CAN NOT BE USED YET (probably central related)
+                return self.ext.posterior_state_dist(
+                    given_state_dist=given_state_dist,
+                    given_diagnosis=given_diagnosis,
+                )
+
+            if central:
+                raise ValueError("Central not implemented yet")
+
+            if midext is None:
+                given_state_dist = np.sum(given_state_dist, axis=0)
+            else:
+                given_state_dist = given_state_dist[int(midext)]
+                given_state_dist = given_state_dist / given_state_dist.sum()
+
+        else:
+            if given_state_dist is None:
+                given_state_dist = self.state_dist(t_stage, subgroup)
 
         if given_diagnosis is None:
             return given_state_dist
@@ -833,6 +855,7 @@ class LymphMixture(
         given_state_dist: np.ndarray | None = None,
         given_diagnosis: dict[str, types.PatternType] | None = None,
         t_stage: str = "early",
+        midext: bool = None,
     ) -> float:
         """Compute risk of a certain ``involvement``, using the ``given_diagnosis``.
 
@@ -851,6 +874,7 @@ class LymphMixture(
             given_state_dist=given_state_dist,
             given_diagnosis=given_diagnosis,
             t_stage=t_stage,
+            midext=midext
         )
 
         # if a specific involvement of interest is provided, marginalize the
