@@ -425,7 +425,8 @@ class LymphMixture(
             unique_keys = list(set(all_params.keys()) - set(spread_params.keys()) - set(distribution_params.keys()))
             if unique_keys != [] and component_kwargs != {}:
                 unique_dict = {}
-                unique_dict = {key: component_kwargs[key] for key in unique_keys}
+                # Only include keys that are actually present in component_kwargs
+                unique_dict = {key: component_kwargs[key] for key in unique_keys if key in component_kwargs}
                 component.set_params(**unique_dict)
 
             for label in self.subgroups:
