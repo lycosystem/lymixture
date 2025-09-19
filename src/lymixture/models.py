@@ -329,7 +329,13 @@ class LymphMixture(
 
             if not self.universal_p:
                 params[str(c)].update(component.get_distribution_params(as_flat=as_flat))
-
+            ## add potential additional values like midext evolution
+            spread_params = component.get_spread_params()
+            all_params = component.get_params()
+            distribution_params = component.get_distribution_params()
+            unique_keys = set(all_params.keys()) - set(spread_params.keys()) - set(distribution_params.keys())
+            params[str(c)].update({key: all_params[key] for key in unique_keys})
+            
             if not model_params_only:
                 for label in self.subgroups:
                     params[str(c)].update(
@@ -412,7 +418,16 @@ class LymphMixture(
 
             if not self.universal_p:
                 args = component.set_distribution_params(*args, **component_kwargs)
-        
+            ## set potential additional values like midext evolution
+            spread_params = component.get_spread_params()
+            all_params = component.get_params()
+            distribution_params = component.get_distribution_params()
+            unique_keys = list(set(all_params.keys()) - set(spread_params.keys()) - set(distribution_params.keys()))
+            if unique_keys != [] and component_kwargs != {}:
+                unique_dict = {}
+                unique_dict = {key: component_kwargs[key] for key in unique_keys}
+                component.set_params(**unique_dict)
+
             for label in self.subgroups:
                 first, args = popfirst(args)
                 value = component_kwargs.get(f"{label}_coef", first)
