@@ -16,5 +16,5 @@ logger.addHandler(logging.NullHandler())
 __all__ = ["LymphMixture", "expectation", "maximization"]
 __version__ = version
 __author__ = "Roman Ludwig"
-__email__ = "roman.ludwig@usz.ch"
+__email__ = "gygqdstu3@mozmail.com"
 __uri__ = "https://github.com/lycosystem/lymixture"

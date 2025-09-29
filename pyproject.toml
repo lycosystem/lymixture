@@ -5,7 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "lymixture"
 description = "Package to model lymphatic spread sa mixture of HMMs as implemented in the `lymph-model` package."
-authors = [{ name = "Julian Brönnimann" }]
+authors = [
+    { name = "Julian Brönnimann" },
+    { name = "Roman Ludwig", email = "gygqdstu3@mozmail.com" },
+    { name = "Yoel Pérez Haas", email = "yoel.perezhaas@usz.ch" },
+    { name = "Noemi Bührer", email = "noemi.buehrer@usz.ch" },
+]
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
