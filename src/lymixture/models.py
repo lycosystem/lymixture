@@ -579,8 +579,8 @@ class LymphMixture(
             modality_children=combined_dict,
             is_modality_leaf=False,
         )
-        t_stage_unique = self.patient_data[('tumor', '1', 't_stage')].unique()
-        self.t_stage_indices = {stage: self.patient_data[('tumor', '1', 't_stage')] == stage for stage in t_stage_unique}
+        t_stage_unique = self.patient_data[MAP_T_COL].unique()
+        self.t_stage_indices = {stage: self.patient_data[MAP_T_COL] == stage for stage in t_stage_unique}
 
     @property
     def patient_data(self) -> pd.DataFrame:
