@@ -20,11 +20,14 @@ from lymph.utils import flatten, popfirst, unflatten_and_split
 
 from lymixture.utils import (
     RESP_COLS,
-    T_STAGE_COL,
     join_with_resps,
     normalize,
     one_slice,
 )
+
+MAP_T_COL = ("_model", "core", "t_stage")
+# RAW_T_COL_OLD = ("tumor", "1", "t_stage")
+# RAW_T_COL_NEW = ("tumor", "core", "t_stage")
 
 pd.options.mode.copy_on_write = True
 warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
@@ -48,7 +51,7 @@ def _set_resps(
 ) -> None:
     """Help setting ``resps`` in the ``data``."""
     if t_stage is not None:
-        is_t_stage = data[T_STAGE_COL] == t_stage
+        is_t_stage = data[MAP_T_COL] == t_stage
     else:
         is_t_stage = np.ones(len(data), dtype=bool)
 
@@ -229,7 +232,7 @@ class LymphMixture(
             subgroups = self.subgroups
 
         for label, subgroup in subgroups.items():  # noqa: PLR1704
-            is_t_stage = subgroup.patient_data[T_STAGE_COL] == t_stage
+            is_t_stage = subgroup.patient_data[MAP_T_COL] == t_stage
             num_patients = is_t_stage.sum() if t_stage is not None else len(is_t_stage)
             result = np.vstack(
                 [
@@ -459,7 +462,7 @@ class LymphMixture(
             is_subgroup = np.ones(len(self.patient_data), dtype=bool)
 
         if t_stage is not None:
-            has_t_stage = self.patient_data[T_STAGE_COL] == t_stage
+            has_t_stage = self.patient_data[MAP_T_COL] == t_stage
         else:
             has_t_stage = np.ones(len(self.patient_data), dtype=bool)
 
