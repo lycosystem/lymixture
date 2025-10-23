@@ -77,6 +77,7 @@ class LymphMixture(
         *,
         universal_p: bool = False,
         shared_transmission: bool = False,
+        split_midext: bool = False,
     ) -> None:
         """Initialize the mixture model.
 
@@ -103,16 +104,13 @@ class LymphMixture(
         if model_kwargs.get("central"):
             msg = "Central tumors not implemented in mixture model."
             raise NotImplementedError(msg)
-        if model_kwargs.get("split_midext"):
-            self.split_midext = True
-        else: 
-            self.split_midext = False
         self._model_cls: type[ModelType] = model_cls
         self._model_kwargs: dict = model_kwargs
         self._mixture_coefs: pd.DataFrame | None = None
         self._split_by: tuple[str, str, str] | None = None
         self.universal_p: bool = universal_p
         self.shared_transmission: bool = shared_transmission
+        self.split_midext = split_midext
 
         self.subgroups: dict[str, ModelType] = {}
         self.components: list[ModelType] = self._init_components(num_components)
@@ -626,9 +624,8 @@ class LymphMixture(
                     component.set_params(**{'midext_prob': self.all_midext_probs[subgroup_key]})
                     for t in t_stages:
                         sub_stage_idx = (self.patient_data['tumor','core','subsite'] == subgroup_key) & (self.t_stage_indices[t])
-                        t_stage_sub_idx = self.patient_data.loc[self.t_stage_indices[t]]['tumor','core','subsite'] == subgroup_key
-                        sub_llhs = component.patient_likelihoods(t)
-                        llhs[sub_stage_idx, i] = sub_llhs[t_stage_sub_idx]
+                        sub_llhs = component.patient_likelihoods(selected_patients = sub_stage_idx)
+                        llhs[sub_stage_idx, i] = sub_llhs
         else: 
             for i, comp in enumerate(components):
                 for t in t_stages:
@@ -639,7 +636,7 @@ class LymphMixture(
             if component is not None:
                 llhs = llhs[:, 0]
 
-            return np.log(llhs) if log else llhs
+        return np.log(llhs) if log else llhs
 
     def patient_mixture_likelihoods(
         self,
