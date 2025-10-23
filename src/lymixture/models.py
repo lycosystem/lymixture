@@ -26,6 +26,7 @@ from lymixture.utils import (
 )
 
 MAP_T_COL = ("_model", "core", "t_stage")
+MAP_EXT_COL = ("_model", "core", "extension")
 # RAW_T_COL_OLD = ("tumor", "1", "t_stage")
 # RAW_T_COL_NEW = ("tumor", "core", "t_stage")
 
@@ -102,7 +103,10 @@ class LymphMixture(
         if model_kwargs.get("central"):
             msg = "Central tumors not implemented in mixture model."
             raise NotImplementedError(msg)
-
+        if model_kwargs.get("split_midext"):
+            self.split_midext = True
+        else: 
+            self.split_midext = False
         self._model_cls: type[ModelType] = model_cls
         self._model_kwargs: dict = model_kwargs
         self._mixture_coefs: pd.DataFrame | None = None
@@ -581,6 +585,12 @@ class LymphMixture(
         )
         t_stage_unique = self.patient_data[MAP_T_COL].unique()
         self.t_stage_indices = {stage: self.patient_data[MAP_T_COL] == stage for stage in t_stage_unique}
+        
+        # store all midext_probs for each ICD code
+        if issubclass(self._model_cls, lymph.models.Midline):
+            self.all_midext_probs = {}
+            for subgroup_key, subgroup in self.subgroups.items():
+                self.all_midext_probs[subgroup_key] = subgroup.patient_data[MAP_EXT_COL].sum()/subgroup.patient_data[MAP_EXT_COL].notna().sum()
 
     @property
     def patient_data(self) -> pd.DataFrame:
@@ -605,26 +615,31 @@ class LymphMixture(
         is set to ``True``, the likelihoods are returned in log-space.
         """
         t_stages = [t_stage] if t_stage is not None else self.t_stages
-
-        sg_keys = list(self.subgroups.keys())
-        sg_idx = slice(None) if subgroup is None else one_slice(sg_keys.index(subgroup))
-        subgroups = list(self.subgroups.values())[sg_idx]
-
         comp_idx = slice(None) if component is None else one_slice(component)
         components = self.components[comp_idx]
 
         shape=(len(self.patient_data), len(components))
         llhs = np.empty(shape)
-        for i, comp in enumerate(components):
-            for t in t_stages:
-                t_idx = self.t_stage_indices[t]
-                sub_llhs = comp.patient_likelihoods(t)
-                llhs[t_idx, i] = sub_llhs
+        if issubclass(self._model_cls, lymph.models.Midline) and self.split_midext:
+            for subgroup_key, subgroup in self.subgroups.items():
+                for i, component in enumerate(components):
+                    component.set_params(**{'midext_prob': self.all_midext_probs[subgroup_key]})
+                    for t in t_stages:
+                        sub_stage_idx = (self.patient_data['tumor','core','subsite'] == subgroup_key) & (self.t_stage_indices[t])
+                        t_stage_sub_idx = self.patient_data.loc[self.t_stage_indices[t]]['tumor','core','subsite'] == subgroup_key
+                        sub_llhs = component.patient_likelihoods(t)
+                        llhs[sub_stage_idx, i] = sub_llhs[t_stage_sub_idx]
+        else: 
+            for i, comp in enumerate(components):
+                for t in t_stages:
+                    t_idx = self.t_stage_indices[t]
+                    sub_llhs = comp.patient_likelihoods(t)
+                    llhs[t_idx, i] = sub_llhs
 
-        if component is not None:
-            llhs = llhs[:, 0]
+            if component is not None:
+                llhs = llhs[:, 0]
 
-        return np.log(llhs) if log else llhs
+            return np.log(llhs) if log else llhs
 
     def patient_mixture_likelihoods(
         self,
