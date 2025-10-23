@@ -13,10 +13,11 @@ from collections.abc import Iterable
 from typing import Any, TypeVar
 
 import lymph
+from lymph.models.unilateral import RAW_T_COL_NEW
 import numpy as np
 import pandas as pd
 from lymph import diagnosis_times, modalities, types
-from lymph.utils import flatten, popfirst, unflatten_and_split
+from lymph.utils import flatten, popfirst, unflatten_and_split, get_item
 
 from lymixture.utils import (
     RESP_COLS,
@@ -27,6 +28,9 @@ from lymixture.utils import (
 
 MAP_T_COL = ("_model", "core", "t_stage")
 MAP_EXT_COL = ("_model", "core", "extension")
+MAP_SUBGROUP_COL = ("_mixture", "core", "subsite")
+RAW_SUBGROUP_OLD = ("tumor", "1", "subsite")
+RAW_SUBGROUP_NEW = ("tumor", "core", "subsite")
 # RAW_T_COL_OLD = ("tumor", "1", "t_stage")
 # RAW_T_COL_NEW = ("tumor", "core", "t_stage")
 
@@ -346,6 +350,10 @@ class LymphMixture(
                     params[str(c)].update(
                         {f"{label}_coef": self.get_mixture_coefs(c, label)},
                     )
+            if self.split_midext:
+                # remove midext_prob from params as it is set per subgroup
+                if 'midext_prob' in params[str(c)]:
+                    del params[str(c)]['midext_prob']
         # Check if transmission parameters are the same for all components
         if self.shared_transmission:
             first_transmission = self.components[0].get_lnl_spread_params(as_flat=as_flat)
@@ -362,7 +370,6 @@ class LymphMixture(
         
         if as_flat or not as_dict:
             params = flatten(params)
-
         return params if as_dict else params.values()
 
 
@@ -557,6 +564,8 @@ class LymphMixture(
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=types.DataWarning)
                 self.subgroups[label].load_patient_data(joined_data, **kwargs)
+                self.subgroups[label].patient_data[MAP_SUBGROUP_COL] = get_item(
+                mapping=self.subgroups[label].patient_data,keys=[RAW_SUBGROUP_OLD, RAW_SUBGROUP_NEW])
         all_patients = pd.concat(
             [subgroup.patient_data for subgroup in self.subgroups.values()],
             ignore_index=True
@@ -623,7 +632,7 @@ class LymphMixture(
                 for i, component in enumerate(components):
                     component.set_params(**{'midext_prob': self.all_midext_probs[subgroup_key]})
                     for t in t_stages:
-                        sub_stage_idx = (self.patient_data['tumor','core','subsite'] == subgroup_key) & (self.t_stage_indices[t])
+                        sub_stage_idx = (self.patient_data[MAP_SUBGROUP_COL] == subgroup_key) & (self.t_stage_indices[t])
                         sub_llhs = component.patient_likelihoods(selected_patients = sub_stage_idx)
                         llhs[sub_stage_idx, i] = sub_llhs
         else: 
