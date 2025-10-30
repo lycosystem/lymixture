@@ -658,7 +658,7 @@ class LymphMixture(
         llhs = np.empty(shape_llhs)
         if issubclass(self._model_cls, lymph.models.Midline) and self.split_midext:
             for i, comp in enumerate(components):
-                component_llhs = np.empty(shape_llhs)
+                component_llhs = np.empty((len(self.patient_data), 2))
                 for t in t_stages:
                     t_idx = self.t_stage_indices[t]
                     sub_llhs = comp.patient_likelihoods(t_stage = t, ext_noext_arrays=True)
