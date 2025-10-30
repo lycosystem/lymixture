@@ -108,6 +108,15 @@ class LymphMixture(
         if model_kwargs.get("central"):
             msg = "Central tumors not implemented in mixture model."
             raise NotImplementedError(msg)
+        if split_midext and not issubclass(model_cls, lymph.models.Midline):
+            msg = "Splitting midline extension only relevant for `Midline` models."
+            raise NotImplementedError(msg)
+        if split_midext:
+            use_evo = model_kwargs.get("use_midext_evo", True)
+            if use_evo:
+                msg = "Splitting midline extension only implemented for the non evolution version. Requires `use_midext_evo=False`."
+                raise ValueError(msg)
+
         self._model_cls: type[ModelType] = model_cls
         self._model_kwargs: dict = model_kwargs
         self._mixture_coefs: pd.DataFrame | None = None
@@ -158,6 +167,31 @@ class LymphMixture(
             index=range(len(self.components)),
             columns=self.subgroups.keys(),
         )
+    
+    def midext_prob_builder(self) -> np.ndarray:
+        """Build an array of midext probabilities for each patient and component.
+        The result will match the number of patients in the model and assign for each patient
+        the correct midext/1-midext probability in column 0 if there is an extension and in column 1 if there is no extension.
+        if the extension is NaN both columns will have the midext and 1-midextprobability.
+        """
+        self.all_midext_probs = {}
+        for subgroup_key, subgroup in self.subgroups.items():
+            self.all_midext_probs[subgroup_key] = subgroup.patient_data[MAP_EXT_COL].sum()/subgroup.patient_data[MAP_EXT_COL].notna().sum()
+
+        prob_array = np.empty(shape=(len(self.patient_data),2))
+        for i, patient in self.patient_data.iterrows():
+            prob_array[i,0] = self.all_midext_probs[patient[MAP_SUBGROUP_COL]]
+            prob_array[i,1] = 1 - prob_array[i,0]
+        mult_array = np.zeros(prob_array.shape)
+        extension_col = self.patient_data[MAP_EXT_COL]
+        is_nan = extension_col.isna()
+
+        # Where extension is True: first column = 1, second column = 0
+        # Where extension is False: first column = 0, second column = 1
+        # Where extension is NaN: both columns = 1
+        mult_array[:,0] = np.where(is_nan, 1, extension_col.fillna(0))
+        mult_array[:,1] = np.where(is_nan, 1, (~extension_col.fillna(True)).astype(int))
+        self.midext_prob_array = mult_array*prob_array
 
     def get_mixture_coefs(
         self,
@@ -595,10 +629,7 @@ class LymphMixture(
         
         # store all midext_probs for each ICD code
         if issubclass(self._model_cls, lymph.models.Midline):
-            self.all_midext_probs = {}
-            for subgroup_key, subgroup in self.subgroups.items():
-                self.all_midext_probs[subgroup_key] = subgroup.patient_data[MAP_EXT_COL].sum()/subgroup.patient_data[MAP_EXT_COL].notna().sum()
-
+            self.midext_prob_builder()
     @property
     def patient_data(self) -> pd.DataFrame:
         """Return all patients stored in the individual subgroups."""
@@ -610,7 +641,6 @@ class LymphMixture(
     def patient_component_likelihoods(
         self,
         t_stage: str | None = None,
-        subgroup: str | None = None,
         component: int | None = None,
         *,
         log: bool = True,
@@ -624,18 +654,19 @@ class LymphMixture(
         t_stages = [t_stage] if t_stage is not None else self.t_stages
         comp_idx = slice(None) if component is None else one_slice(component)
         components = self.components[comp_idx]
-
-        shape=(len(self.patient_data), len(components))
-        llhs = np.empty(shape)
+        shape_llhs = (len(self.patient_data), len(components))
+        llhs = np.empty(shape_llhs)
         if issubclass(self._model_cls, lymph.models.Midline) and self.split_midext:
-            for subgroup_key, subgroup in self.subgroups.items():
-                for i, component in enumerate(components):
-                    component.set_params(**{'midext_prob': self.all_midext_probs[subgroup_key]})
-                    for t in t_stages:
-                        sub_stage_idx = (self.patient_data[MAP_SUBGROUP_COL] == subgroup_key) & (self.t_stage_indices[t])
-                        sub_llhs = component.patient_likelihoods(selected_patients = sub_stage_idx)
-                        llhs[sub_stage_idx, i] = sub_llhs
-        else: 
+            for i, comp in enumerate(components):
+                component_llhs = np.empty(shape_llhs)
+                for t in t_stages:
+                    t_idx = self.t_stage_indices[t]
+                    sub_llhs = comp.patient_likelihoods(t_stage = t, ext_noext_arrays=True)
+                    component_llhs[t_idx, ] = sub_llhs
+                component_llhs = component_llhs*self.midext_prob_array
+                component_llhs = np.sum(component_llhs, axis=1)
+                llhs[:, i] = component_llhs
+        else:
             for i, comp in enumerate(components):
                 for t in t_stages:
                     t_idx = self.t_stage_indices[t]
@@ -650,7 +681,6 @@ class LymphMixture(
     def patient_mixture_likelihoods(
         self,
         t_stage: str | None = None,
-        subgroup: str | None = None,
         component: int | None = None,
         *,
         log: bool = True,
@@ -670,13 +700,11 @@ class LymphMixture(
         """
         component_patient_likelihood = self.patient_component_likelihoods(
             t_stage=t_stage,
-            subgroup=subgroup,
             component=component,
             log=log,
         )
         full_mixture_coefs = self.repeat_mixture_coefs(
             t_stage=t_stage,
-            subgroup=subgroup,
             log=log,
         )
 
@@ -700,7 +728,6 @@ class LymphMixture(
     def incomplete_data_likelihood(
         self,
         t_stage: str | None = None,
-        subgroup: str | None = None,
         component: int | None = None,
         *,
         log: bool = True,
@@ -708,7 +735,6 @@ class LymphMixture(
         """Compute the incomplete data likelihood of the model."""
         llhs = self.patient_mixture_likelihoods(
             t_stage=t_stage,
-            subgroup=subgroup,
             component=component,
             log=log,
             marginalize=True,
@@ -718,7 +744,6 @@ class LymphMixture(
     def complete_data_likelihood(
         self,
         t_stage: str | None = None,
-        subgroup: str | None = None,
         component: int | None = None,
         *,
         log: bool = True,
@@ -726,7 +751,6 @@ class LymphMixture(
         """Compute the complete data likelihood of the model."""
         llhs = self.patient_mixture_likelihoods(
             t_stage=t_stage,
-            subgroup=subgroup,
             component=component,
             log=log,
         )
@@ -736,7 +760,6 @@ class LymphMixture(
             llhs[(np.isinf(llhs)) & (self.repeat_mixture_coefs() == 0)] = 0
         resps = self.get_resps(
             t_stage=t_stage,
-            subgroup=subgroup,
             component=component,
         ).to_numpy()
         if log:
