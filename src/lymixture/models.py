@@ -186,11 +186,8 @@ class LymphMixture(
         extension_col = self.patient_data[MAP_EXT_COL]
         is_nan = extension_col.isna()
 
-        # Where extension is True: first column = 1, second column = 0
-        # Where extension is False: first column = 0, second column = 1
-        # Where extension is NaN: both columns = 1
-        mult_array[:,0] = np.where(is_nan, 1, extension_col.fillna(0))
-        mult_array[:,1] = np.where(is_nan, 1, (~extension_col.fillna(True)).astype(int))
+        mult_array[:,0] = np.where(is_nan, 1, extension_col.fillna(0).astype(int))
+        mult_array[:,1] = np.where(is_nan, 1, (~extension_col.astype(bool).fillna(True)).astype(int))
         self.midext_prob_array = mult_array*prob_array
 
     def get_mixture_coefs(
