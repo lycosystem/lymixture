@@ -7,8 +7,12 @@ functions to compute the expectation and maximization steps of the `EM algorithm
 """
 
 import logging
+import os
 from collections.abc import Callable, Sequence
-from multiprocessing import Pool
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import current_process
+import copy
+
 
 import emcee
 import numpy as np
@@ -61,6 +65,61 @@ def _set_params(model: models.LymphMixture, params: np.ndarray) -> None:
         params = np.array(params)
 
 
+def _is_in_parallel_context() -> bool:
+    """Check if we're already running in a parallel worker process.
+    
+    Returns True if:
+    - Running in a multiprocessing worker (process name is not MainProcess)
+    - SLURM_JOB_ID environment variable is set (running in a SLURM job)
+    - Any other common parallelization indicators
+    """
+    # Check if we're in a multiprocessing worker
+    if current_process().name != 'MainProcess':
+        return True
+    
+    # Check for SLURM environment
+    if 'SLURM_JOB_ID' in os.environ:
+        return True
+    
+    # Check for common parallel environment variables
+    parallel_env_vars = ['PBS_JOBID', 'LSB_JOBID', 'JOB_ID']
+    if any(var in os.environ for var in parallel_env_vars):
+        return True
+    
+    return False
+
+
+def _optimize_single_component(args: tuple) -> tuple[int, np.ndarray]:
+    """Optimize a single component. Used for parallel execution.
+    
+    Args:
+        args: Tuple of (component_index, component_params, model, num_components)
+    
+    Returns:
+        Tuple of (component_index, optimized_parameters)
+    """
+    i, current_params, model, _ = args
+
+    
+    lb = np.zeros(shape=len(current_params))
+    ub = np.ones(shape=len(current_params))
+
+    result = opt.minimize(
+        fun=_neg_complete_component_llh,
+        args=(model, i),
+        x0=current_params,
+        bounds=opt.Bounds(lb=lb, ub=ub),
+        method="Powell",
+        callback=init_callback(),
+    )
+
+    if result.success:
+        return i, result.x
+    else:
+        msg = f"Optimization failed for component {i}: {result}"
+        raise RuntimeError(msg)
+
+
 def expectation(
     model: models.LymphMixture,
     params: dict[str, float],
@@ -107,7 +166,13 @@ def _neg_complete_component_llh(
     This function is used in the M-step of the EM algorithm.
     """
     try:
-        model.components[component].set_params(*params)
+        if model.split_midext:
+            filtered = {k: v for k, v in model.components[component].get_params().items() if k != 'midext_prob'}
+            param_names = list(filtered.keys())
+            params_dict_new = dict(zip(param_names, params))
+            model.components[component].set_params(**params_dict_new)
+        else:
+            model.components[component].set_params(*params)
     except ValueError:
         return np.inf
 
@@ -138,6 +203,7 @@ def _neg_complete_component_llh_shared(
 def maximization(
     model: models.LymphMixture,
     log_resps: np.ndarray,
+    parallelize: bool = True,
 ) -> dict[str, float]:
     """Maximize ``model`` params given expectation of ``latent`` variables.
 
@@ -150,7 +216,7 @@ def maximization(
     log_maxed_mix_coefs = model.infer_mixture_coefs(new_resps=log_resps, log=True)
     log_maxed_mix_coefs = utils.log_normalize(log_maxed_mix_coefs, axis=0)
     model.set_mixture_coefs(np.exp(log_maxed_mix_coefs))
-    if model.shared_transmission or model.universal_p or model.split_midext:
+    if model.shared_transmission or model.universal_p:
         current_params = list(model.get_params(as_dict=False, model_params_only=True))
         lb = np.zeros(shape=len(current_params))
         ub = np.ones(shape=len(current_params))
@@ -172,26 +238,71 @@ def maximization(
             raise RuntimeError(msg)
 
     else:
-        for i, component in enumerate(model.components):
-            current_params = list(component.get_params(as_dict=False))
-            lb = np.zeros(shape=len(current_params))
-            ub = np.ones(shape=len(current_params))
+        # Check if we should parallelize component optimization
+        # Only parallelize if: (1) we have multiple components AND (2) not already in parallel context
+        num_components = len(model.components)
+        use_parallel = num_components > 1 and not _is_in_parallel_context() and parallelize
+        
+        if use_parallel:
+            # Parallel optimization of components
+            logger.debug(f"Parallelizing {num_components} component optimizations")
+            
+            
+            optimization_args = []
+            for i, component in enumerate(model.components):
+                if model.split_midext:
+                    filtered = {k: v for k, v in component.get_params().items() if k != 'midext_prob'}
+                    current_params = list(filtered.values())
+                else:
+                    current_params = list(component.get_params(as_dict=False))
+                optimization_args.append((i, current_params, copy.deepcopy(model), num_components))
+            
+            # Use ProcessPoolExecutor to parallelize
+            with ProcessPoolExecutor(max_workers=num_components) as executor:
+                results = list(executor.map(_optimize_single_component, optimization_args))
+            
+            # Set optimized parameters back to components
+            for i, optimized_params in results:
+                if model.split_midext:
+                    filtered = {k: v for k, v in model.components[i].get_params().items() if k != 'midext_prob'}
+                    param_names = list(filtered.keys())
+                    params_dict_new = dict(zip(param_names, optimized_params))
+                    model.components[i].set_params(**params_dict_new)
+                else:
+                    model.components[i].set_params(*optimized_params)
+        else:
+            if _is_in_parallel_context() and parallelize:
+                logger.debug("Already in parallel context, using sequential component optimization")
+            
+            for i, component in enumerate(model.components):
+                if model.split_midext:
+                    filtered = {k: v for k, v in component.get_params().items() if k != 'midext_prob'}
+                    current_params = list(filtered.values())
+                else:
+                    current_params = list(component.get_params(as_dict=False))
+                lb = np.zeros(shape=len(current_params))
+                ub = np.ones(shape=len(current_params))
 
-            result = opt.minimize(
-                fun=_neg_complete_component_llh,
-                args=(model, i),
-                x0=current_params,
-                bounds=opt.Bounds(lb=lb, ub=ub),
-                method="Powell",
-                callback=init_callback(),
-            )
+                result = opt.minimize(
+                    fun=_neg_complete_component_llh,
+                    args=(model, i),
+                    x0=current_params,
+                    bounds=opt.Bounds(lb=lb, ub=ub),
+                    method="Powell",
+                    callback=init_callback(),
+                )
 
-            if result.success:
-                component.set_params(*result.x)
-            else:
-                msg = f"Optimization failed: {result}"
-                raise RuntimeError(msg)
-
+                if result.success:
+                    if model.split_midext:
+                        filtered = {k: v for k, v in component.get_params().items() if k != 'midext_prob'}
+                        param_names = list(filtered.keys())
+                        params_dict_new = dict(zip(param_names, result.x))
+                        component.set_params(**params_dict_new)
+                    else:
+                        component.set_params(*result.x)
+                else:
+                    msg = f"Optimization failed: {result}"
+                    raise RuntimeError(msg)
     return model.get_params(as_dict=True)
 
 

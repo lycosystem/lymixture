@@ -670,8 +670,8 @@ class LymphMixture(
                     sub_llhs = comp.patient_likelihoods(t)
                     llhs[t_idx, i] = sub_llhs
 
-            if component is not None:
-                llhs = llhs[:, 0]
+        if component is not None:
+            llhs = llhs[:, 0]
 
         return np.log(llhs) if log else llhs
 
