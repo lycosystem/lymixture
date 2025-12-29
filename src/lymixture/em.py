@@ -10,9 +10,8 @@ import logging
 import os
 from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor
-from multiprocessing import current_process
+from multiprocessing import current_process, Pool
 import copy
-
 
 import emcee
 import numpy as np
@@ -98,7 +97,7 @@ def _optimize_single_component(args: tuple) -> tuple[int, np.ndarray]:
     Returns:
         Tuple of (component_index, optimized_parameters)
     """
-    i, current_params, model, _ = args
+    i, current_params, model, _, method = args
 
     
     lb = np.zeros(shape=len(current_params))
@@ -109,7 +108,7 @@ def _optimize_single_component(args: tuple) -> tuple[int, np.ndarray]:
         args=(model, i),
         x0=current_params,
         bounds=opt.Bounds(lb=lb, ub=ub),
-        method="Powell",
+        method=method,
         callback=init_callback(),
     )
 
@@ -165,6 +164,7 @@ def _neg_complete_component_llh(
 
     This function is used in the M-step of the EM algorithm.
     """
+    # print(params)
     try:
         if model.split_midext:
             filtered = {k: v for k, v in model.components[component].get_params().items() if k != 'midext_prob'}
@@ -204,6 +204,7 @@ def maximization(
     model: models.LymphMixture,
     log_resps: np.ndarray,
     parallelize: bool = True,
+    method: str = "Powell",
 ) -> dict[str, float]:
     """Maximize ``model`` params given expectation of ``latent`` variables.
 
@@ -225,7 +226,7 @@ def maximization(
             args=(model),
             x0=current_params,
             bounds=opt.Bounds(lb=lb, ub=ub),
-            method="Powell",
+            method=method,
             callback=init_callback(),
         )
 
@@ -247,7 +248,6 @@ def maximization(
             # Parallel optimization of components
             logger.debug(f"Parallelizing {num_components} component optimizations")
             
-            
             optimization_args = []
             for i, component in enumerate(model.components):
                 if model.split_midext:
@@ -255,7 +255,7 @@ def maximization(
                     current_params = list(filtered.values())
                 else:
                     current_params = list(component.get_params(as_dict=False))
-                optimization_args.append((i, current_params, copy.deepcopy(model), num_components))
+                optimization_args.append((i, current_params, copy.deepcopy(model), num_components, method))
             
             # Use ProcessPoolExecutor to parallelize
             with ProcessPoolExecutor(max_workers=num_components) as executor:
@@ -288,7 +288,7 @@ def maximization(
                     args=(model, i),
                     x0=current_params,
                     bounds=opt.Bounds(lb=lb, ub=ub),
-                    method="Powell",
+                    method=method,
                     callback=init_callback(),
                 )
 
@@ -619,7 +619,6 @@ def aip_sampling_algorithm(
         # Latent sampling
         new_latent, current_prob = mh_latent_sampler_per_patient_2_component(
             model,
-            complete_latent_likelihood,
             temperature,
         )
         latent_samples.append(new_latent)

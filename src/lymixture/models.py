@@ -656,20 +656,27 @@ class LymphMixture(
         if issubclass(self._model_cls, lymph.models.Midline) and self.split_midext:
             for i, comp in enumerate(components):
                 component_llhs = np.empty((len(self.patient_data), 2))
-                for t in t_stages:
-                    t_idx = self.t_stage_indices[t]
-                    sub_llhs = comp.patient_likelihoods(t_stage = t, ext_noext_arrays=True)
-                    component_llhs[t_idx, ] = sub_llhs
+                if t_stage is None:
+                    sub_llhs = comp.patient_likelihoods(ext_noext_arrays=True)
+                    component_llhs = sub_llhs
+                else:
+                    for t in t_stages:
+                        t_idx = self.t_stage_indices[t]
+                        sub_llhs = comp.patient_likelihoods(t_stage = t, ext_noext_arrays=True)
+                        component_llhs[t_idx, ] = sub_llhs
                 component_llhs = component_llhs*self.midext_prob_array
                 component_llhs = np.sum(component_llhs, axis=1)
                 llhs[:, i] = component_llhs
         else:
             for i, comp in enumerate(components):
-                for t in t_stages:
-                    t_idx = self.t_stage_indices[t]
-                    sub_llhs = comp.patient_likelihoods(t)
-                    llhs[t_idx, i] = sub_llhs
-
+                if t_stage is None:
+                    sub_llhs = comp.patient_likelihoods()
+                    llhs[:, i] = sub_llhs
+                else:
+                    for t in t_stages:
+                        t_idx = self.t_stage_indices[t]
+                        sub_llhs = comp.patient_likelihoods(t)
+                        llhs[t_idx, i] = sub_llhs
         if component is not None:
             llhs = llhs[:, 0]
 
