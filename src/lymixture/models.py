@@ -13,18 +13,26 @@ from collections.abc import Iterable
 from typing import Any, TypeVar
 
 import lymph
+from lymph.models.unilateral import RAW_T_COL_NEW
 import numpy as np
 import pandas as pd
 from lymph import diagnosis_times, modalities, types
-from lymph.utils import flatten, popfirst, unflatten_and_split
+from lymph.utils import flatten, popfirst, unflatten_and_split, get_item
 
 from lymixture.utils import (
     RESP_COLS,
-    T_STAGE_COL,
     join_with_resps,
     normalize,
     one_slice,
 )
+
+MAP_T_COL = ("_model", "core", "t_stage")
+MAP_EXT_COL = ("_model", "core", "extension")
+MAP_SUBGROUP_COL = ("_mixture", "core", "subsite")
+RAW_SUBGROUP_OLD = ("tumor", "1", "subsite")
+RAW_SUBGROUP_NEW = ("tumor", "core", "subsite")
+# RAW_T_COL_OLD = ("tumor", "1", "t_stage")
+# RAW_T_COL_NEW = ("tumor", "core", "t_stage")
 
 pd.options.mode.copy_on_write = True
 warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
@@ -38,6 +46,21 @@ warnings.filterwarnings(
     action="ignore",
     message="Not all distributions are equal. Returning the first one.",
 )
+
+
+def _set_resps(
+    data: pd.DataFrame,
+    resps: np.ndarray,
+    columns: pd.MultiIndex,
+    t_stage: str | None = None,
+) -> None:
+    """Help setting ``resps`` in the ``data``."""
+    if t_stage is not None:
+        is_t_stage = data[MAP_T_COL] == t_stage
+    else:
+        is_t_stage = np.ones(len(data), dtype=bool)
+
+    data.loc[is_t_stage, columns] = resps
 
 
 ModelType = TypeVar("ModelType", bound=types.Model)
@@ -57,6 +80,8 @@ class LymphMixture(
         num_components: int = 2,
         *,
         universal_p: bool = False,
+        shared_transmission: bool = False,
+        split_midext: bool = False,
     ) -> None:
         """Initialize the mixture model.
 
@@ -65,26 +90,44 @@ class LymphMixture(
         indicates whether the model shares the time prior distribution over all
         components.
         """
-        if model_kwargs is None:
-            model_kwargs = {
-                "graph_dict": {
-                    ("tumor", "T"): ["II", "III"],
-                    ("lnl", "II"): ["III"],
-                    ("lnl", "III"): [],
-                },
-            }
+        model_kwargs = model_kwargs or {
+            "graph_dict": {
+                ("tumor", "T"): ["II", "III"],
+                ("lnl", "II"): ["III"],
+                ("lnl", "III"): [],
+            },
+        }
 
-        if not issubclass(model_cls, lymph.models.Unilateral):
-            msg = "Mixture model only implemented for `Unilateral` model."
+        if not (
+            issubclass(model_cls, lymph.models.Unilateral)
+            or issubclass(model_cls, lymph.models.Bilateral)
+            or issubclass(model_cls, lymph.models.Midline)
+        ):
+            msg = "Mixture model only implemented for `Unilateral`, `Bilateral`, and `Midline` models."
             raise NotImplementedError(msg)
+        if model_kwargs.get("central"):
+            msg = "Central tumors not implemented in mixture model."
+            raise NotImplementedError(msg)
+        if split_midext and not issubclass(model_cls, lymph.models.Midline):
+            msg = "Splitting midline extension only relevant for `Midline` models."
+            raise NotImplementedError(msg)
+        if split_midext:
+            use_evo = model_kwargs.get("use_midext_evo", True)
+            if use_evo:
+                msg = "Splitting midline extension only implemented for the non evolution version. Requires `use_midext_evo=False`."
+                raise ValueError(msg)
 
-        self._model_cls = model_cls
-        self._model_kwargs = model_kwargs
-        self._mixture_coefs = None
-        self.universal_p = universal_p
+        self._model_cls: type[ModelType] = model_cls
+        self._model_kwargs: dict = model_kwargs
+        self._mixture_coefs: pd.DataFrame | None = None
+        self._split_by: tuple[str, str, str] | None = None
+        self.universal_p: bool = universal_p
+        self.shared_transmission: bool = shared_transmission
+        self.split_midext = split_midext
 
         self.subgroups: dict[str, ModelType] = {}
         self.components: list[ModelType] = self._init_components(num_components)
+        self.transmission_param_names = list(self.components[0].get_lnl_spread_params().keys())
 
         diagnosis_times.Composite.__init__(
             self,
@@ -124,6 +167,28 @@ class LymphMixture(
             index=range(len(self.components)),
             columns=self.subgroups.keys(),
         )
+    
+    def midext_prob_builder(self) -> np.ndarray:
+        """Build an array of midext probabilities for each patient and component.
+        The result will match the number of patients in the model and assign for each patient
+        the correct midext/1-midext probability in column 0 if there is an extension and in column 1 if there is no extension.
+        if the extension is NaN both columns will have the midext and 1-midextprobability.
+        """
+        self.all_midext_probs = {}
+        for subgroup_key, subgroup in self.subgroups.items():
+            self.all_midext_probs[subgroup_key] = subgroup.patient_data[MAP_EXT_COL].sum()/subgroup.patient_data[MAP_EXT_COL].notna().sum()
+
+        prob_array = np.empty(shape=(len(self.patient_data),2))
+        for i, patient in self.patient_data.iterrows():
+            prob_array[i,0] = self.all_midext_probs[patient[MAP_SUBGROUP_COL]]
+            prob_array[i,1] = 1 - prob_array[i,0]
+        mult_array = np.zeros(prob_array.shape)
+        extension_col = self.patient_data[MAP_EXT_COL]
+        is_nan = extension_col.isna()
+
+        mult_array[:,0] = np.where(is_nan, 1, extension_col.fillna(0).astype(int))
+        mult_array[:,1] = np.where(is_nan, 1, (~extension_col.astype(bool).fillna(True)).astype(int))
+        self.midext_prob_array = mult_array*prob_array
 
     def get_mixture_coefs(
         self,
@@ -204,7 +269,7 @@ class LymphMixture(
             subgroups = self.subgroups
 
         for label, subgroup in subgroups.items():  # noqa: PLR1704
-            is_t_stage = subgroup.patient_data[T_STAGE_COL] == t_stage
+            is_t_stage = subgroup.patient_data[MAP_T_COL] == t_stage
             num_patients = is_t_stage.sum() if t_stage is not None else len(is_t_stage)
             result = np.vstack(
                 [
@@ -218,30 +283,36 @@ class LymphMixture(
     def infer_mixture_coefs(
         self,
         new_resps: np.ndarray | None = None,
+        *,
+        log: bool = False,
     ) -> pd.DataFrame:
-        """Infer the optimal mixture parameters given the mixture's responsibilities.
+        """Infer optimal mixture coefficients based on responsibilities.
 
-        This method can be seen as part of the M-step of the EM algorithm, since the
-        mixture's likelihood is maximized with respect to the mixture coefficients when
-        they are simply the average of the corresponding responsibilities.
+        This method updates the mixture coefficients by averaging the corresponding
+        responsibilities, which can be provided via ``new_resps`` or taken from the
+        model if ``new_resps`` is ``None``.
 
-        If set to ``None``, the responsibilities already stored in the model are used.
-        Otherwise, they are first set via the :py:meth:`.set_resps` method.
+        The result is a ``DataFrame`` of shape ``(num_components, num_subgroups)``,
+        which can be used to update the mixture coefficients via
+        ``set_mixture_coefs``.
 
-        The returned ``DataFrame`` has the shape ``(num_components, num_subgroups)`` and
-        can be used to set the mixture coefficients via the
-        :py:meth:`.set_mixture_coefs` method.
+        If ``log`` is ``True``, both the input ``new_resps`` and the output
+        coefficients are in log-space for numerical stability.
         """
         mixture_coefs = np.zeros(self.get_mixture_coefs().shape).T
 
-        if new_resps is not None:
-            self.set_resps(new_resps)
+        if log:
+            log_resps = new_resps
+            new_resps = np.exp(log_resps)
 
         for i, subgroup in enumerate(self.subgroups.keys()):
-            num_in_subgroup = len(self.subgroups[subgroup].patient_data)
-            mixture_coefs[i] = (
-                self.get_resps(subgroup=subgroup).sum(axis=0) / num_in_subgroup
-            )
+            len_subgroup = len(self.subgroups[subgroup].patient_data)
+            idx = self.get_resp_indices(subgroup=subgroup)
+            if log:
+                log_sum = np.logaddexp.reduce(log_resps[idx], axis=0)
+                mixture_coefs[i] = log_sum - np.log(len_subgroup)
+            else:
+                mixture_coefs[i] = np.sum(new_resps[idx], axis=0) / len_subgroup
 
         return pd.DataFrame(mixture_coefs.T, columns=self.subgroups.keys())
 
@@ -250,6 +321,7 @@ class LymphMixture(
         *,
         as_dict: bool = True,
         as_flat: bool = True,
+        model_params_only: bool = False,
     ) -> Iterable[float] | dict[str, float]:
         """Get the parameters of the mixture model.
 
@@ -287,24 +359,50 @@ class LymphMixture(
          '1_IItoIII_spread': 0.0}
         """
         params = {}
+        transmission_params = {}
         for c, component in enumerate(self.components):
-            if self.universal_p:
-                params[str(c)] = component.get_spread_params(as_flat=as_flat)
+            if self.shared_transmission:
+                params[str(c)] = component.get_tumor_spread_params(as_flat=as_flat)
+                transmission_params[str(c)] = component.get_lnl_spread_params(as_flat=as_flat)
             else:
-                params[str(c)] = component.get_params(as_flat=as_flat)
+                params[str(c)] = component.get_spread_params(as_flat=as_flat)
 
-            for label in self.subgroups:
-                params[str(c)].update(
-                    {f"{label}_coef": self.get_mixture_coefs(c, label)},
-                )
+            if not self.universal_p:
+                params[str(c)].update(component.get_distribution_params(as_flat=as_flat))
+            ## add potential additional values like midext evolution
+            spread_params = component.get_spread_params()
+            all_params = component.get_params()
+            distribution_params = component.get_distribution_params()
+            unique_keys = set(all_params.keys()) - set(spread_params.keys()) - set(distribution_params.keys())
+            params[str(c)].update({key: all_params[key] for key in unique_keys})
+            
+            if not model_params_only:
+                for label in self.subgroups:
+                    params[str(c)].update(
+                        {f"{label}_coef": self.get_mixture_coefs(c, label)},
+                    )
+            if self.split_midext:
+                # remove midext_prob from params as it is set per subgroup
+                if 'midext_prob' in params[str(c)]:
+                    del params[str(c)]['midext_prob']
+        # Check if transmission parameters are the same for all components
+        if self.shared_transmission:
+            first_transmission = self.components[0].get_lnl_spread_params(as_flat=as_flat)
+            for c, component in enumerate(self.components[1:], start=1):
+                if component.get_lnl_spread_params(as_flat=as_flat) != first_transmission:
+                    warnings.warn(
+                        "The transmission parameters are different between components. " \
+                        "Returning parameters for the first component.",
+                    )
+            params.update(first_transmission)
 
         if self.universal_p:
             params.update(self.get_distribution_params(as_flat=as_flat))
-
+        
         if as_flat or not as_dict:
             params = flatten(params)
-
         return params if as_dict else params.values()
+
 
     def set_params(self, *args: float, **kwargs: float) -> tuple[float]:
         """Assign new params to the component models.
@@ -347,6 +445,14 @@ class LymphMixture(
             kwargs,
             expected_keys=[str(c) for c, _ in enumerate(self.components)],
         )
+        # If shared_transmission is True, remove transmission params from component-specific kwargs
+        if self.shared_transmission:
+            for c_str in kwargs:
+                component_kwargs = kwargs[c_str]
+                for param_name in list(component_kwargs.keys()):
+                    if param_name in self.transmission_param_names:
+                        del component_kwargs[param_name]
+        
 
         for c, component in enumerate(self.components):
             component_kwargs = global_kwargs.copy()
@@ -355,6 +461,16 @@ class LymphMixture(
 
             if not self.universal_p:
                 args = component.set_distribution_params(*args, **component_kwargs)
+            ## set potential additional values like midext evolution
+            spread_params = component.get_spread_params()
+            all_params = component.get_params()
+            distribution_params = component.get_distribution_params()
+            unique_keys = list(set(all_params.keys()) - set(spread_params.keys()) - set(distribution_params.keys()))
+            if unique_keys != [] and component_kwargs != {}:
+                unique_dict = {}
+                # Only include keys that are actually present in component_kwargs
+                unique_dict = {key: component_kwargs[key] for key in unique_keys if key in component_kwargs}
+                component.set_params(**unique_dict)
 
             for label in self.subgroups:
                 first, args = popfirst(args)
@@ -368,56 +484,60 @@ class LymphMixture(
         self.normalize_mixture_coefs()
         return args
 
+    def get_resp_indices(
+        self,
+        subgroup: str | None = None,
+        t_stage: str | None = None,
+    ) -> np.ndarray:
+        """Get the indices of the responsibilities.
+
+        Returns a boolean array of shape ``(num_patients,)`` that is ``True`` for each
+        patient that has the given ``t_stage`` and belongs to the given ``subgroup``.
+
+        Both ``subgroup`` and ``t_stage`` are optional.
+        """
+        if subgroup is not None:
+            is_subgroup = self.patient_data[self._split_by] == subgroup
+        else:
+            is_subgroup = np.ones(len(self.patient_data), dtype=bool)
+
+        if t_stage is not None:
+            has_t_stage = self.patient_data[MAP_T_COL] == t_stage
+        else:
+            has_t_stage = np.ones(len(self.patient_data), dtype=bool)
+
+        return is_subgroup & has_t_stage
+
     def get_resps(
         self,
-        patient: int | None = None,
         subgroup: str | None = None,
         component: int | None = None,
         t_stage: str | None = None,
         *,
         norm: bool = True,
-    ) -> float | pd.Series | pd.DataFrame:
-        """Get the responsibility of a ``patient`` for a ``component``.
+    ) -> pd.Series | pd.DataFrame:
+        """Get the responsibilities of each patient for a component.
 
-        The ``patient`` index enumerates all patients in the mixture model unless
-        ``subgroup`` is given, in which case the index runs over the patients in the
-        given subgroup.
-
-        Omitting ``component`` or ``patient`` (or both) will return corresponding slices
-        of the responsibility table.
-
-        The ``filter_by`` argument can be used to filter the responsibility table by
-        any ``filter_value`` in the patient data. Most commonly, this is used to filter
-        the responsibilities by T-stage.
+        One can filter the returned table of responsibilities by the patient's subgroup
+        and T-stage. If ``norm`` is set to ``True``, the responsibilities are normalized
+        to sum to one along the component axis.
         """
-        if subgroup is not None:
-            resp_table = self.subgroups[subgroup].patient_data[RESP_COLS]
-        else:
-            resp_table = self.patient_data[RESP_COLS]
+        resp_table = self.patient_data[RESP_COLS]
 
         if norm:
             # double transpose, because pandas has weird broadcasting behavior
             resp_table = normalize(resp_table.T, axis=0).T
 
-        if t_stage is not None:
-            idx = resp_table["t_stage"] == t_stage
-            if patient is not None and not idx[patient]:
-                msg = f"Patient {patient} does not have T-stage {t_stage}."
-                raise ValueError(msg)
-            if patient is not None:
-                idx = patient
-        else:
-            idx = slice(None) if patient is None else patient
-
+        idx = self.get_resp_indices(subgroup=subgroup, t_stage=t_stage)
         component = slice(None) if component is None else component
         return resp_table.loc[idx, component]
 
     def set_resps(
         self,
         new_resps: float | np.ndarray,
-        patient: int | None = None,
         subgroup: str | None = None,
         component: int | None = None,
+        t_stage: str | None = None,
     ) -> None:
         """Assign ``new_resps`` (responsibilities) to the model.
 
@@ -437,27 +557,19 @@ class LymphMixture(
         if isinstance(new_resps, pd.DataFrame):
             new_resps = new_resps.to_numpy()
 
-        pat_slice = slice(None) if patient is None else patient
         comp_slice = (*RESP_COLS, slice(None) if component is None else component)
+        _kwargs = {"t_stage": t_stage, "columns": comp_slice}
 
         if subgroup is not None:
             sub_data = self.subgroups[subgroup].patient_data
-            sub_data.loc[pat_slice, comp_slice] = new_resps
+            _set_resps(data=sub_data, resps=new_resps, **_kwargs)
             return
 
-        patient_idx = 0
         for subgroup in self.subgroups.values():  # noqa: PLR1704
             sub_data = subgroup.patient_data
-            patient_idx += len(sub_data)
-
-            if patient is not None:
-                if patient_idx > patient:
-                    sub_data.loc[pat_slice, comp_slice] = new_resps
-                    break
-            else:
-                sub_resp = new_resps[: len(sub_data)]
-                sub_data.loc[pat_slice, comp_slice] = sub_resp
-                new_resps = new_resps[len(sub_data) :]
+            sub_resp = new_resps[: len(sub_data)]
+            _set_resps(data=sub_data, resps=sub_resp, **_kwargs)
+            new_resps = new_resps[len(sub_data) :]
 
     def load_patient_data(
         self,
@@ -473,7 +585,8 @@ class LymphMixture(
         :py:meth:`~lymph.models.Unilateral.load_patient_data` method.
         """
         self._mixture_coefs = None
-        grouped = patient_data.groupby(split_by)
+        self._split_by = split_by
+        grouped = patient_data.groupby(self._split_by)
 
         for label, data in grouped:
             if label not in self.subgroups:
@@ -482,13 +595,38 @@ class LymphMixture(
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=types.DataWarning)
                 self.subgroups[label].load_patient_data(joined_data, **kwargs)
+                self.subgroups[label].patient_data[MAP_SUBGROUP_COL] = get_item(
+                mapping=self.subgroups[label].patient_data,keys=[RAW_SUBGROUP_OLD, RAW_SUBGROUP_NEW])
+        all_patients = pd.concat(
+            [subgroup.patient_data for subgroup in self.subgroups.values()],
+            ignore_index=True
+        )
+        # Remove _model and _mixture columns from MultiIndex DataFrame
 
+        all_patients = all_patients.drop(columns=['_model', '_mixture'], errors='ignore')
+        # Remove unused levels from MultiIndex
+        if hasattr(all_patients.columns, 'remove_unused_levels'):
+            all_patients.columns = all_patients.columns.remove_unused_levels()
+        all_patients = all_patients.reset_index(drop=True)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=types.DataWarning)
+            for component in self.components: # load the data in the correct order
+                component.load_patient_data(all_patients, **kwargs)
+
+        #need the component dict to set modalities. We can probably do this more elegantly
+        component_dict = {i: comp for i, comp in enumerate(self.components)}
+        combined_dict = {**self.subgroups, **component_dict}
         modalities.Composite.__init__(
             self,
-            modality_children=self.subgroups,
+            modality_children=combined_dict,
             is_modality_leaf=False,
         )
-
+        t_stage_unique = self.patient_data[MAP_T_COL].unique()
+        self.t_stage_indices = {stage: self.patient_data[MAP_T_COL] == stage for stage in t_stage_unique}
+        
+        # store all midext_probs for each ICD code
+        if issubclass(self._model_cls, lymph.models.Midline):
+            self.midext_prob_builder()
     @property
     def patient_data(self) -> pd.DataFrame:
         """Return all patients stored in the individual subgroups."""
@@ -500,7 +638,6 @@ class LymphMixture(
     def patient_component_likelihoods(
         self,
         t_stage: str | None = None,
-        subgroup: str | None = None,
         component: int | None = None,
         *,
         log: bool = True,
@@ -512,32 +649,30 @@ class LymphMixture(
         is set to ``True``, the likelihoods are returned in log-space.
         """
         t_stages = [t_stage] if t_stage is not None else self.t_stages
-
-        sg_keys = list(self.subgroups.keys())
-        sg_idx = slice(None) if subgroup is None else one_slice(sg_keys.index(subgroup))
-        subgroups = list(self.subgroups.values())[sg_idx]
-
         comp_idx = slice(None) if component is None else one_slice(component)
         components = self.components[comp_idx]
-
-        llhs = np.empty(shape=(0, len(components)))
-
-        for subgroup in subgroups:  # noqa: PLR1704
-            shape = (len(subgroup.patient_data), len(components))
-            sub_llhs = np.empty(shape=shape)
-
-            for t in t_stages:
-                # use the index to align the likelihoods with the patients
-                t_idx = subgroup.patient_data[T_STAGE_COL] == t
-                sub_llhs[t_idx] = np.stack(
-                    [  # TODO: Precompute the state-dists for better performance
-                        comp.state_dist(t) @ subgroup.diagnosis_matrix(t).T
-                        for comp in components
-                    ],
-                    axis=-1,
-                )
-            llhs = np.vstack([llhs, sub_llhs])
-
+        shape_llhs = (len(self.patient_data), len(components))
+        llhs = np.empty(shape_llhs)
+        if issubclass(self._model_cls, lymph.models.Midline) and self.split_midext:
+            for i, comp in enumerate(components):
+                component_llhs = np.empty((len(self.patient_data), 2))
+                if t_stage is None:
+                    sub_llhs = comp.patient_likelihoods(ext_noext_arrays=True)
+                    component_llhs = sub_llhs
+                else:
+                    for t in t_stages:
+                        t_idx = self.t_stage_indices[t]
+                        sub_llhs = comp.patient_likelihoods(t_stage = t, ext_noext_arrays=True)
+                        component_llhs[t_idx, ] = sub_llhs
+                component_llhs = component_llhs*self.midext_prob_array
+                component_llhs = np.sum(component_llhs, axis=1)
+                llhs[:, i] = component_llhs
+        else:
+            for i, comp in enumerate(components):
+                for t in t_stages:
+                    t_idx = self.t_stage_indices[t]
+                    sub_llhs = comp.patient_likelihoods(t_stage = t)
+                    llhs[t_idx, i] = sub_llhs
         if component is not None:
             llhs = llhs[:, 0]
 
@@ -546,7 +681,6 @@ class LymphMixture(
     def patient_mixture_likelihoods(
         self,
         t_stage: str | None = None,
-        subgroup: str | None = None,
         component: int | None = None,
         *,
         log: bool = True,
@@ -566,13 +700,11 @@ class LymphMixture(
         """
         component_patient_likelihood = self.patient_component_likelihoods(
             t_stage=t_stage,
-            subgroup=subgroup,
             component=component,
             log=log,
         )
         full_mixture_coefs = self.repeat_mixture_coefs(
             t_stage=t_stage,
-            subgroup=subgroup,
             log=log,
         )
 
@@ -596,7 +728,6 @@ class LymphMixture(
     def incomplete_data_likelihood(
         self,
         t_stage: str | None = None,
-        subgroup: str | None = None,
         component: int | None = None,
         *,
         log: bool = True,
@@ -604,7 +735,6 @@ class LymphMixture(
         """Compute the incomplete data likelihood of the model."""
         llhs = self.patient_mixture_likelihoods(
             t_stage=t_stage,
-            subgroup=subgroup,
             component=component,
             log=log,
             marginalize=True,
@@ -614,7 +744,6 @@ class LymphMixture(
     def complete_data_likelihood(
         self,
         t_stage: str | None = None,
-        subgroup: str | None = None,
         component: int | None = None,
         *,
         log: bool = True,
@@ -622,19 +751,22 @@ class LymphMixture(
         """Compute the complete data likelihood of the model."""
         llhs = self.patient_mixture_likelihoods(
             t_stage=t_stage,
-            subgroup=subgroup,
             component=component,
             log=log,
         )
+        if component is not None:
+            llhs[(np.isinf(llhs)) & (self.repeat_mixture_coefs()[:,component] == 0)] = 0
+        else:
+            llhs[(np.isinf(llhs)) & (self.repeat_mixture_coefs() == 0)] = 0
         resps = self.get_resps(
             t_stage=t_stage,
-            subgroup=subgroup,
             component=component,
         ).to_numpy()
         if log:
             with np.errstate(invalid="ignore"):
                 final_llh = resps * llhs
-            final_llh[np.isnan(final_llh)] = 0
+            nan_condition = np.isnan(final_llh) & np.isinf(llhs) & (resps == 0)
+            final_llh[nan_condition] = 0
             return np.sum(final_llh)
         return np.prod(llhs**resps)
 
@@ -693,17 +825,17 @@ class LymphMixture(
         distribution is computed for all subgroups. The result is a matrix with shape
         ``(num_subgroups, num_states)``.
         """
-        comp_state_dist_size = len(self.components[0].state_dist(t_stage))
-        comp_state_dists = np.zeros((len(self.components), comp_state_dist_size))
+        comp_state_dist_size = self.components[0].state_dist(t_stage).shape
+        comp_state_dists = np.zeros((len(self.components), *comp_state_dist_size))
         for i, component in enumerate(self.components):
             comp_state_dists[i] = component.state_dist(t_stage)
 
         if subgroup is not None:
-            state_dist = self.get_mixture_coefs(subgroup=subgroup) @ comp_state_dists
+            state_dist = np.tensordot(self.get_mixture_coefs(subgroup=subgroup), comp_state_dists, axes=1)
         else:
-            state_dist = np.zeros((len(self.subgroups), comp_state_dist_size))
+            state_dist = np.zeros((len(self.subgroups), *comp_state_dist_size))
             for i, mixer in enumerate(self._mixture_coefs.items()):
-                state_dist[i] = mixer[1] @ comp_state_dists
+                state_dist[i] = np.tensordot(mixer[1], comp_state_dists, axes=1)
 
         return state_dist
 
@@ -714,6 +846,8 @@ class LymphMixture(
         given_state_dist: np.ndarray | None = None,
         given_diagnosis: types.DiagnosisType | None = None,
         t_stage: str | int = "early",
+        midext: bool = None,
+        central: bool = None,
     ) -> np.ndarray:
         """Compute the posterior distribution over hidden states given a diagnosis.
 
@@ -730,16 +864,36 @@ class LymphMixture(
         The ``t_stage`` parameter determines the T-stage for which the posterior is
         computed.
         """
-        if given_state_dist is None:
-            # in contrast to when computing the likelihood, we do want to raise an error
-            # here if the parameters are invalid, since we want to know if the user
-            # provided invalid parameters.
-            if given_params is not None:
-                if isinstance(given_params, dict):
-                    self.set_params(**given_params)
-                else:
-                    self.set_params(*given_params)
-            given_state_dist = self.state_dist(t_stage, subgroup)
+        # in contrast to when computing the likelihood, we do want to raise an error
+        # here if the parameters are invalid, since we want to know if the user
+        # provided invalid parameters.
+        if given_params is not None:
+            if isinstance(given_params, dict):
+                self.set_params(**given_params)
+            else:
+                self.set_params(*given_params)
+        if type(self.components[0]) == lymph.models.Midline:
+            given_state_dist = self.state_dist(
+                    t_stage=t_stage, subgroup=subgroup
+                )
+            if given_state_dist.ndim == 2: #figure out what this is and whether we need it. THIS CAN NOT BE USED YET (probably central related)
+                return self.ext.posterior_state_dist(
+                    given_state_dist=given_state_dist,
+                    given_diagnosis=given_diagnosis,
+                )
+
+            if central:
+                raise ValueError("Central not implemented yet")
+
+            if midext is None:
+                given_state_dist = np.sum(given_state_dist, axis=0)
+            else:
+                given_state_dist = given_state_dist[int(midext)]
+                given_state_dist = given_state_dist / given_state_dist.sum()
+
+        else:
+            if given_state_dist is None:
+                given_state_dist = self.state_dist(t_stage, subgroup)
 
         if given_diagnosis is None:
             return given_state_dist
@@ -764,6 +918,7 @@ class LymphMixture(
         given_state_dist: np.ndarray | None = None,
         given_diagnosis: dict[str, types.PatternType] | None = None,
         t_stage: str = "early",
+        midext: bool = None,
     ) -> float:
         """Compute risk of a certain ``involvement``, using the ``given_diagnosis``.
 
@@ -782,6 +937,7 @@ class LymphMixture(
             given_state_dist=given_state_dist,
             given_diagnosis=given_diagnosis,
             t_stage=t_stage,
+            midext=midext
         )
 
         # if a specific involvement of interest is provided, marginalize the

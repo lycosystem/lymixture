@@ -11,8 +11,6 @@ warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
 logger = logging.getLogger(__name__)
 
 RESP_COLS = ("_mixture", "responsibility")
-T_STAGE_COL = ("_model", "#", "t_stage")
-
 
 def binom_pmf(k: np.ndarray, n: int, p: float) -> np.ndarray:
     """Compute binomial PMF fast."""
@@ -78,6 +76,19 @@ def normalize(
     small_idx = np.isclose(normalized, 0.0, **isclose_kwargs)
     normalized[small_idx] = 0.0
     return normalized / np.sum(normalized, axis=axis)
+
+
+def log_normalize(
+    log_values: np.ndarray,
+    axis: int,
+) -> np.ndarray:
+    """Log-normalize ``log_values`` to sum to 1 along ``axis``.
+
+    >>> log_norm = log_normalize(np.log([0.1, 0.2, 0.7]), axis=0)
+    >>> np.exp(np.logaddexp.reduce(log_norm, axis=0))   # doctest: +NORMALIZE_WHITESPACE
+    np.float64(1.0)
+    """
+    return log_values - np.logaddexp.reduce(log_values, axis=axis)
 
 
 def harden(values: np.ndarray, axis: int) -> np.ndarray:
