@@ -195,3 +195,4 @@ pyrightconfig.json
 
 # VS Code
 .vscode/
+src/lymixture/_version.py
