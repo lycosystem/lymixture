@@ -669,14 +669,10 @@ class LymphMixture(
                 llhs[:, i] = component_llhs
         else:
             for i, comp in enumerate(components):
-                if t_stage is None:
-                    sub_llhs = comp.patient_likelihoods()
-                    llhs[:, i] = sub_llhs
-                else:
-                    for t in t_stages:
-                        t_idx = self.t_stage_indices[t]
-                        sub_llhs = comp.patient_likelihoods(t)
-                        llhs[t_idx, i] = sub_llhs
+                for t in t_stages:
+                    t_idx = self.t_stage_indices[t]
+                    sub_llhs = comp.patient_likelihoods(t_stage = t)
+                    llhs[t_idx, i] = sub_llhs
         if component is not None:
             llhs = llhs[:, 0]
 
