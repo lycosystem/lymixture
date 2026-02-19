@@ -897,18 +897,19 @@ class LymphMixture(
 
         if given_diagnosis is None:
             return given_state_dist
-        diagnosis_encoding = self.subgroups[subgroup].compute_encoding(given_diagnosis)
-        # vector containing P(Z=z|X). Essentially a data matrix for one patient
-        diagnosis_given_state = (
-            diagnosis_encoding @ self.subgroups[subgroup].observation_matrix().T
-        )
+        return self.components[0].posterior_state_dist(given_state_dist = given_state_dist, given_diagnosis=given_diagnosis)
+        # diagnosis_encoding = self.subgroups[subgroup].compute_encoding(given_diagnosis)
+        # # vector containing P(Z=z|X). Essentially a data matrix for one patient
+        # diagnosis_given_state = (
+        #     diagnosis_encoding @ self.subgroups[subgroup].observation_matrix().T
+        # )
 
-        # multiply P(Z=z|X) * P(X) element-wise to get vector of joint probs P(Z=z,X)
-        joint_diagnosis_and_state = given_state_dist * diagnosis_given_state
+        # # multiply P(Z=z|X) * P(X) element-wise to get vector of joint probs P(Z=z,X)
+        # joint_diagnosis_and_state = given_state_dist * diagnosis_given_state
 
-        # compute vector of probabilities for all possible involvements given the
-        # specified diagnosis P(X|Z=z) = P(Z=z,X) / P(X), where P(X) = sum_z P(Z=z,X)
-        return joint_diagnosis_and_state / np.sum(joint_diagnosis_and_state)
+        # # compute vector of probabilities for all possible involvements given the
+        # # specified diagnosis P(X|Z=z) = P(Z=z,X) / P(X), where P(X) = sum_z P(Z=z,X)
+        # return joint_diagnosis_and_state / np.sum(joint_diagnosis_and_state)
 
     def risk(
         self,
