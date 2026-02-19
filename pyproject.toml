@@ -32,6 +32,7 @@ docs = [
 [tool.setuptools_scm]
 write_to = "src/lymixture/_version.py"
 local_scheme = "no-local-version"
+version_scheme = "no-guess-dev"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
