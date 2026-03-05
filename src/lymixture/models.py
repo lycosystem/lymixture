@@ -1000,20 +1000,20 @@ class LymphMixture(
         float
             The posterior risk of the specified involvement pattern given the diagnosis.
         """
-        if (midext is not None) or (type(self.components[0]) != lymph.models.Midline) or (not self.split_midext):
-            risk = 0
-            if given_params is not None:
-                if isinstance(given_params, dict):
-                    self.set_params(**given_params)
-                else:
-                    self.set_params(*given_params)
-            for i, component in enumerate(self.components):
-                risk += component.risk(involvement = involvement, given_diagnosis= given_diagnosis, t_stage = t_stage, midext = midext)*self.get_mixture_coefs()[subgroup][i]
-            return risk
-                
-        elif type(self.components[0]) == lymph.models.Midline and self.split_midext:
+
+        if given_params is not None:
+            if isinstance(given_params, dict):
+                self.set_params(**given_params)
+            else:
+                self.set_params(*given_params)
+
+        weights = self.get_mixture_coefs()[subgroup]
+        is_midline = isinstance(self.components[0], lymph.models.Midline)
+
+        if is_midline and self.split_midext and (midext is None):
             comp_state_dist_size = self.components[0].noext.state_dist(t_stage).shape
             comp_state_dists = np.zeros((len(self.components), *comp_state_dist_size))
+
             for i, component in enumerate(self.components):
                 diag_time_matrix = np.diag(component.get_distribution(t_stage).pmf)
                 ipsi_dist_evo = component.ext.ipsi.state_dist_evo()
@@ -1027,8 +1027,7 @@ class LymphMixture(
                 )
                 comp_state_dists[i] = ipsi_dist_evo.T @ diag_time_matrix @ contra_dist_evo_marginalized
 
-            # PAPER VERSION (non bayesian): posterior per component, then mix posteriors with fixed π
-            weights = self.get_mixture_coefs()[subgroup]
+            # PAPER VERSION: posterior per component, then mix with fixed π
             posterior_state_dist = np.zeros_like(comp_state_dists[0])
             for i, component in enumerate(self.components):
                 post_i = component.posterior_state_dist(
@@ -1038,3 +1037,23 @@ class LymphMixture(
                 posterior_state_dist += weights[i] * post_i
 
             return self.components[0].marginalize(involvement, posterior_state_dist)
+
+        # --- generic branch: paper version risk mixing ---
+        risk = 0.0
+        for i, component in enumerate(self.components):
+            if is_midline:
+                comp_risk = component.risk(
+                    involvement=involvement,
+                    given_diagnosis=given_diagnosis,
+                    t_stage=t_stage,
+                    midext=midext,   # can be True/False/None; component handles it
+                )
+            else:
+                comp_risk = component.risk(
+                    involvement=involvement,
+                    given_diagnosis=given_diagnosis,
+                    t_stage=t_stage,
+                )
+            risk += weights[i] * comp_risk
+
+        return risk
