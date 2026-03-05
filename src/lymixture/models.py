@@ -817,119 +817,224 @@ class LymphMixture(
     def state_dist(
         self,
         t_stage: str = "early",
-        subgroup: str | None = None,
     ) -> np.ndarray:
-        """Compute the distribution over possible states.
+        """Compute the distribution over possible states for all components.
 
-        Do this for a given ``t_stage`` and ``subgroup``. If no subgroup is given, the
-        distribution is computed for all subgroups. The result is a matrix with shape
-        ``(num_subgroups, num_states)``.
+        Do this for a given ``t_stage``. The result is a matrix with shape
+        ``(num_components, num_states)``.
         """
         comp_state_dist_size = self.components[0].state_dist(t_stage).shape
         comp_state_dists = np.zeros((len(self.components), *comp_state_dist_size))
         for i, component in enumerate(self.components):
             comp_state_dists[i] = component.state_dist(t_stage)
-
-        if subgroup is not None:
-            state_dist = np.tensordot(self.get_mixture_coefs(subgroup=subgroup), comp_state_dists, axes=1)
-        else:
-            state_dist = np.zeros((len(self.subgroups), *comp_state_dist_size))
-            for i, mixer in enumerate(self._mixture_coefs.items()):
-                state_dist[i] = np.tensordot(mixer[1], comp_state_dists, axes=1)
-
-        return state_dist
+        return comp_state_dists
 
     def posterior_state_dist(
         self,
         subgroup: str | None = None,
         given_params: types.ParamsType | None = None,
-        given_state_dist: np.ndarray | None = None,
         given_diagnosis: types.DiagnosisType | None = None,
         t_stage: str | int = "early",
         midext: bool = None,
         central: bool = None,
     ) -> np.ndarray:
-        """Compute the posterior distribution over hidden states given a diagnosis.
+        """Compute a *fixed-weight mixture* posterior distribution over hidden states.
 
-        The ``given_diagnosis`` is a dictionary of diagnosis for each modality. E.g.,
-        this could look like this:
+        This method returns the posterior distribution over the hidden state space
+        conditioned on an observed clinical diagnosis. For mixture models, we use a
+        **non–fully Bayesian** combination rule: component mixture weights are treated as
+        **fixed, subsite-dependent population weights** and are **not updated** based on
+        the patient's diagnosis.
 
-        .. code-block:: python
+        Concretely, let component index :math:`m=1,\\dots,M` have subsite-specific weight
+        :math:`\\pi_m^s` (with :math:`\\sum_m \\pi_m^s = 1`). Each component defines its
+        own prior hidden-state distribution :math:`p_m(\\mathbf{X}\\mid T)` (via the HMM)
+        and a diagnosis model :math:`p(\\mathbf{Z}\\mid\\mathbf{X})` (via sensitivity and
+        specificity, shared across components). For a given diagnosis :math:`\\mathbf{Z}`
+        and T-stage :math:`T`, we compute the component-wise posterior state distribution
 
-            given_diagnosis = {
-                "MRI": {"II": True, "III": False, "IV": False},
-                "PET": {"II": True, "III": True, "IV": None},
-            }
+        .. math::
 
-        The ``t_stage`` parameter determines the T-stage for which the posterior is
-        computed.
+            p_m(\\mathbf{X}\\mid\\mathbf{Z}, T)
+            \\propto
+            p(\\mathbf{Z}\\mid\\mathbf{X})\\,p_m(\\mathbf{X}\\mid T),
+
+        and then form the mixture posterior by averaging component posteriors using the
+        fixed weights:
+
+        .. math::
+
+            p(\\mathbf{X}\\mid\\mathbf{Z}, T, s)
+            =
+            \\sum_{m=1}^M \\pi_m^s\\, p_m(\\mathbf{X}\\mid\\mathbf{Z}, T).
+
+        Importantly, this differs from a fully Bayesian latent-class mixture posterior,
+        which would replace :math:`\\pi_m^s` with diagnosis-dependent responsibilities
+        :math:`p(m\\mid\\mathbf{Z},T,s)`. The fixed-weight averaging is intentional: it
+        encodes the assumption that each patient belongs to a subsite-specific *mixture
+        population*, and the mixture coefficients represent stable subsite composition
+        rather than a patient-specific latent class to be inferred from :math:`\\mathbf{Z}`.
+
+        Parameters
+        ----------
+        subgroup:
+            Subgroup identifier used to select subsite-dependent mixture coefficients and,
+            where applicable, subgroup-specific state distributions.
+        given_params:
+            Optional parameters to set on the model before computing the posterior.
+            If provided as a dict, it is passed to ``set_params(**given_params)``;
+            otherwise to ``set_params(*given_params)``.
+        given_diagnosis:
+            Observed diagnosis per modality. Example:
+
+            .. code-block:: python
+
+                given_diagnosis = {
+                    "MRI": {"II": True, "III": False, "IV": False},
+                    "PET": {"II": True, "III": True, "IV": None},
+                }
+
+            If ``None``, the method returns the (mixture) prior state distribution.
+        t_stage:
+            T-stage for which to compute the prior / posterior.
+        midext:
+            For midline-capable components, optionally condition on midline extension state.
+            If ``None``, averages over extension status; otherwise selects the requested
+            extension branch and renormalizes.
+        central:
+            Placeholder for future support of central tumors.
+
+        Returns
+        -------
+        np.ndarray
+            Posterior distribution over hidden states with the same shape as the state
+            distribution returned by ``state_dist`` (after any midline aggregation/selection).
         """
-        # in contrast to when computing the likelihood, we do want to raise an error
-        # here if the parameters are invalid, since we want to know if the user
-        # provided invalid parameters.
         if given_params is not None:
             if isinstance(given_params, dict):
                 self.set_params(**given_params)
             else:
                 self.set_params(*given_params)
         if type(self.components[0]) == lymph.models.Midline:
-            given_state_dist = self.state_dist(
-                    t_stage=t_stage, subgroup=subgroup
+            given_state_dists = self.state_dist(
+                    t_stage=t_stage
                 )
-            if given_state_dist.ndim == 2: #figure out what this is and whether we need it. THIS CAN NOT BE USED YET (probably central related)
-                return self.ext.posterior_state_dist(
-                    given_state_dist=given_state_dist,
-                    given_diagnosis=given_diagnosis,
-                )
-
             if central:
                 raise ValueError("Central not implemented yet")
 
             if midext is None:
-                given_state_dist = np.sum(given_state_dist, axis=0)
+                for i, given_state_dist in enumerate(given_state_dists):
+                    given_state_dists[i] = given_state_dist[0] * (1 - self.all_midext_probs[subgroup]) + given_state_dist[1] * self.all_midext_probs[subgroup]
             else:
-                given_state_dist = given_state_dist[int(midext)]
-                given_state_dist = given_state_dist / given_state_dist.sum()
+                given_state_dists = given_state_dists[:, int(midext), :, :]   # shape: (n, 32, 32)
+                given_state_dists = given_state_dists / given_state_dists.sum(axis=(1, 2), keepdims=True)
 
         else:
-            if given_state_dist is None:
-                given_state_dist = self.state_dist(t_stage, subgroup)
-
+            given_state_dists = self.state_dist(
+            t_stage=t_stage
+                )
+            
         if given_diagnosis is None:
-            return given_state_dist
-        return self.components[0].posterior_state_dist(given_state_dist = given_state_dist, given_diagnosis=given_diagnosis)
+            combined_state_dist = np.sum(given_state_dists * self.get_mixture_coefs()[subgroup][:, np.newaxis], axis=0)
+            return combined_state_dist
+        combined_state_dist = np.zeros_like(given_state_dists[0])
+        for i, state_dist in enumerate(given_state_dists):
+            combined_state_dist += self.components[i].posterior_state_dist(given_state_dist = state_dist, given_diagnosis=given_diagnosis) * self.get_mixture_coefs()[subgroup][i]
+        return combined_state_dist
 
     def risk(
         self,
         subgroup: str,
         involvement: types.PatternType,
         given_params: types.ParamsType | None = None,
-        given_state_dist: np.ndarray | None = None,
         given_diagnosis: dict[str, types.PatternType] | None = None,
         t_stage: str = "early",
         midext: bool = None,
     ) -> float:
-        """Compute risk of a certain ``involvement``, using the ``given_diagnosis``.
+        """Compute the risk of a given ``involvement`` pattern given a clinical diagnosis.
 
-        If an ``involvement`` pattern of interest is provided, this method computes
-        the risk of seeing just that pattern for the set of given parameters and a
-        dictionary of diagnosis for each modality.
+        This method evaluates the probability of a specified lymph node involvement pattern
+        conditional on an observed diagnosis and the model parameters.
 
-        If no ``involvement`` is provided, this will simply return the posterior
-        distribution over hidden states, given the diagnosis, as computed by the
-        :py:meth:`.posterior_state_dist` method. See its documentation for more
-        details about the arguments and the return value.
+        For mixture models, the risk is computed using a **fixed-weight mixture formulation**.
+        First, the posterior risk is computed independently for each component HMM using the
+        component-specific parameters. The final risk is then obtained by averaging these
+        component risks using the subsite-specific mixture coefficients.
+
+        Mathematically, the risk is computed as
+
+        .. math::
+
+            P(X_v = 1 \mid Z, T, s; \\theta, \\pi)
+            =
+            \\sum_{m=1}^{M} \\pi_m^{s}
+            P(X_v = 1 \mid Z, T; \\theta_m),
+
+        where :math:`\\pi_m^{s}` are the subsite-dependent mixture weights and
+        :math:`P(X_v = 1 \mid Z, T; \\theta_m)` is the posterior risk computed from
+        component :math:`m`.
+
+        Importantly, the mixture weights remain **fixed** and are not updated based on the
+        observed diagnosis. This reflects the interpretation that the mixture components
+        represent population-level spread patterns rather than patient-specific latent
+        classes.
+
+        Parameters
+        ----------
+        subgroup :
+            Subsite or subgroup identifier used to select the appropriate mixture
+            coefficients.
+        involvement :
+            Dictionary specifying the lymph node involvement pattern of interest.
+        given_params :
+            Optional model parameters that will be set before computing the risk.
+        given_diagnosis :
+            Dictionary containing the observed diagnosis for each imaging modality.
+        t_stage :
+            Tumor T-stage used to compute the underlying hidden state distribution.
+        midext :
+            Optional flag specifying the midline extension status for midline models.
+
+        Returns
+        -------
+        float
+            The posterior risk of the specified involvement pattern given the diagnosis.
         """
-        posterior_state_dist = self.posterior_state_dist(
-            subgroup,
-            given_params=given_params,
-            given_state_dist=given_state_dist,
-            given_diagnosis=given_diagnosis,
-            t_stage=t_stage,
-            midext=midext
-        )
+        if (midext is not None) or (type(self.components[0]) != lymph.models.Midline) or (not self.split_midext):
+            risk = 0
+            if given_params is not None:
+                if isinstance(given_params, dict):
+                    self.set_params(**given_params)
+                else:
+                    self.set_params(*given_params)
+            for i, component in enumerate(self.components):
+                risk += component.risk(involvement = involvement, given_diagnosis= given_diagnosis, t_stage = t_stage, midext = midext)*self.get_mixture_coefs()[subgroup][i]
+            return risk
+                
+        elif type(self.components[0]) == lymph.models.Midline and self.split_midext:
+            comp_state_dist_size = self.components[0].noext.state_dist(t_stage).shape
+            comp_state_dists = np.zeros((len(self.components), *comp_state_dist_size))
+            for i, component in enumerate(self.components):
+                diag_time_matrix = np.diag(component.get_distribution(t_stage).pmf)
+                ipsi_dist_evo = component.ext.ipsi.state_dist_evo()
+                contra_dist_evo = {}
+                contra_dist_evo["noext"], contra_dist_evo["ext"] = component.contra_state_dist_evo(
+                    unmodified_midext_prob=True
+                )
+                contra_dist_evo_marginalized = (
+                    contra_dist_evo["noext"] * (1 - self.all_midext_probs[subgroup])
+                    + contra_dist_evo["ext"] * self.all_midext_probs[subgroup]
+                )
+                comp_state_dists[i] = ipsi_dist_evo.T @ diag_time_matrix @ contra_dist_evo_marginalized
 
-        # if a specific involvement of interest is provided, marginalize the
-        # resulting vector of hidden states to match that involvement of
-        # interest
-        return self.components[0].marginalize(involvement, posterior_state_dist)
+            # PAPER VERSION (non bayesian): posterior per component, then mix posteriors with fixed π
+            weights = self.get_mixture_coefs()[subgroup]
+            posterior_state_dist = np.zeros_like(comp_state_dists[0])
+            for i, component in enumerate(self.components):
+                post_i = component.posterior_state_dist(
+                    given_state_dist=comp_state_dists[i],
+                    given_diagnosis=given_diagnosis,
+                )
+                posterior_state_dist += weights[i] * post_i
+
+            return self.components[0].marginalize(involvement, posterior_state_dist)
