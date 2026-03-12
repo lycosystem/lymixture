@@ -876,14 +876,13 @@ class LymphMixture(
             given_state_dist = self.state_dist(
                     t_stage=t_stage, subgroup=subgroup
                 )
-            if given_state_dist.ndim == 2: #figure out what this is and whether we need it. THIS CAN NOT BE USED YET (probably central related)
+            if given_state_dist.ndim == 2: #A midline model with midline extension (non central) will always have 3D state distributions. 2D arises in the central model, which is not implemented yet. We keep this here for the future
+                if central:
+                    raise ValueError("Central not implemented yet")
                 return self.ext.posterior_state_dist(
                     given_state_dist=given_state_dist,
                     given_diagnosis=given_diagnosis,
                 )
-
-            if central:
-                raise ValueError("Central not implemented yet")
 
             if midext is None:
                 given_state_dist = np.sum(given_state_dist, axis=0)
@@ -895,7 +894,7 @@ class LymphMixture(
             if given_state_dist is None:
                 given_state_dist = self.state_dist(t_stage, subgroup)
 
-        if given_diagnosis is None:
+        if given_diagnosis is None: #without diagnosis we return the prior distribution over states
             return given_state_dist
         return self.components[0].posterior_state_dist(given_state_dist = given_state_dist, given_diagnosis=given_diagnosis)
 
