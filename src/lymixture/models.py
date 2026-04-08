@@ -635,6 +635,82 @@ class LymphMixture(
             ignore_index=True,
         )
 
+    def joint_diagnosis_state_dists(
+        self, 
+        given_diagnosis: dict[str, Any],
+        t_stage: str | None = None,
+        midext: bool | None = None,
+        ) -> np.ndarray:
+        """Compute P(Z|X) * P(X|component) for each component."""
+        component0 = self.components[0] # we assume that all components have the same diagnosis model, so we can just use the first one to compute P(Z|X)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"No diagnosis given for .*lateral side\.",
+            )
+            base_shape = component0.posterior_state_dist(
+                t_stage=t_stage,
+                midext=midext,
+            ).shape
+        joint_diagnosis_state_dists = np.zeros((len(self.components),) + base_shape)
+        if issubclass(self._model_cls, lymph.models.Midline):
+            diagnosis_given_state = {}
+            for side in ["ipsi", "contra"]:
+                if side not in given_diagnosis:
+                    print(f"No diagnosis given for {side}lateral side.")
+
+                diagnosis_encoding = getattr(component0.noext, side).compute_encoding(
+                    given_diagnosis.get(side, {}),
+                )
+                observation_matrix = getattr(component0.noext, side).observation_matrix()
+                # vector with P(Z=z|X) for each state X. A data matrix for one "patient"
+                diagnosis_given_state[side] = diagnosis_encoding @ observation_matrix.T
+        else: #unilateral version
+            diagnosis_encoding = component0.compute_encoding(
+                given_diagnosis
+            )
+            observation_matrix = component0.observation_matrix()
+            # vector with P(Z=z|X) for each state X. A data matrix for one "patient"
+            diagnosis_given_state = diagnosis_encoding @ observation_matrix.T
+        for index, component in enumerate(self.components):
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r"No diagnosis given for .*lateral side\.",
+                )
+                given_state_dist = component.posterior_state_dist(
+                    t_stage=t_stage,
+                    midext=midext,
+                )
+            if issubclass(self._model_cls, lymph.models.Midline): # matrix with P(Zi=zi,Zc=zc|Xi,Xc) * P(Xi,Xc) for all states Xi,Xc.
+
+                joint_diagnosis_and_state = (
+                np.outer(
+                    diagnosis_given_state["ipsi"],
+                    diagnosis_given_state["contra"],
+                    ) * given_state_dist
+                )
+            else: # vector with P(Zi=zi,Zc=zc|X) for each state
+                joint_diagnosis_and_state = diagnosis_given_state * given_state_dist
+            joint_diagnosis_state_dists[index] = joint_diagnosis_and_state
+        return joint_diagnosis_state_dists
+    
+    def normalize_subsite_probs(
+        self, 
+        joint_diagnosis_state_dists: np.ndarray
+        )-> dict[str, float]:
+        """Compute normalized subsite probabilities from the joint diagnosis-and-state distributions."""
+        component_likelihoods = joint_diagnosis_state_dists.sum(axis=tuple(range(1, joint_diagnosis_state_dists.ndim)))
+        subsite_probs = {}
+        mixture_coefs = self.get_mixture_coefs()
+        for subsite in self.get_mixture_coefs().columns:
+            subsite_probs[subsite] = (mixture_coefs[subsite]*component_likelihoods).sum()
+        total_prob = np.array(list(subsite_probs.values())).sum()
+        if total_prob <= 0:
+            raise ValueError("Total subsite probability is zero; diagnosis likelihood under all subsites vanished.")
+        normalized_subsite_probs = {subsite: prob / total_prob for subsite, prob in subsite_probs.items()}
+        return normalized_subsite_probs
+    
     def patient_component_likelihoods(
         self,
         t_stage: str | None = None,
