@@ -695,7 +695,7 @@ class LymphMixture(
             joint_diagnosis_state_dists[index] = joint_diagnosis_and_state
         return joint_diagnosis_state_dists
     
-    def normalize_subsite_probs(
+    def unnormalized_subsite_probs(
         self, 
         joint_diagnosis_state_dists: np.ndarray
         )-> dict[str, float]:
@@ -709,8 +709,79 @@ class LymphMixture(
         if total_prob <= 0:
             raise ValueError("Total subsite probability is zero; diagnosis likelihood under all subsites vanished.")
         normalized_subsite_probs = {subsite: prob / total_prob for subsite, prob in subsite_probs.items()}
-        return normalized_subsite_probs
+        return subsite_probs
     
+    def normalize_subsite_probs_prior(
+        self,
+        joint_diagnosis_state_dists: np.ndarray,
+        prior: dict[str, float] | None = None,
+        other_locations_tau: bool = None,
+        ) -> dict[str, float]:
+        """Compute normalized subsite probabilities from the joint diagnosis-and-state distributions.
+
+        Parameters
+        ----------
+        joint_diagnosis_state_dists : np.ndarray
+            Array containing P(Z|X) * P(X|component) for each mixture component.
+            The first axis indexes mixture components; all remaining axes span the
+            hidden state space.
+
+        prior : dict[str, float] | None, optional
+            Optional prior over subsites. If None, a uniform prior over subsites is used.
+            If provided, it should map each subsite name to a non-negative prior weight.
+            The prior does not need to be normalized.
+
+        Returns
+        -------
+        dict[str, float]
+            Posterior probability per subsite after normalization.
+        """
+        component_likelihoods = joint_diagnosis_state_dists.sum(
+            axis=tuple(range(1, joint_diagnosis_state_dists.ndim))
+        )
+
+        mixture_coefs = self.get_mixture_coefs()
+        subsites = list(mixture_coefs.columns)
+
+        if prior is None:
+            prior = {subsite: 1.0 for subsite in subsites}
+            if other_locations_tau is not None:
+                warnings.warn(
+                    "other_locations_tau provided without a prior. Ignoring other locations.",
+                    UserWarning,
+                )
+        else:
+            missing = [subsite for subsite in subsites if subsite not in prior]
+            if missing:
+                raise ValueError(
+                    f"Prior is missing entries for the following subsites: {missing}"
+                )
+
+            negative = [subsite for subsite, value in prior.items() if value < 0]
+            if negative:
+                raise ValueError(
+                    f"Prior contains negative values for the following subsites: {negative}"
+                )
+
+        subsite_probs = {}
+        for subsite in subsites:
+            likelihood = (mixture_coefs[subsite] * component_likelihoods).sum()
+            subsite_probs[subsite] = likelihood * prior[subsite]
+        if other_locations_tau is not None and "other" in prior:
+            subsite_probs["other"] = np.exp(other_locations_tau) * prior["other"]
+
+        total_prob = sum(subsite_probs.values())
+        if total_prob <= 0:
+            raise ValueError(
+                "Total subsite probability is zero; diagnosis likelihood under all "
+                "subsites vanished after applying the prior."
+            )
+
+        normalized_subsite_probs = {
+            subsite: prob / total_prob for subsite, prob in subsite_probs.items()
+        }
+        return normalized_subsite_probs
+        
     def patient_component_likelihoods(
         self,
         t_stage: str | None = None,
