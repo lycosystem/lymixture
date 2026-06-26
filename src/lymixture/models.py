@@ -708,34 +708,60 @@ class LymphMixture(
         total_prob = np.array(list(subsite_probs.values())).sum()
         if total_prob <= 0:
             raise ValueError("Total subsite probability is zero; diagnosis likelihood under all subsites vanished.")
-        normalized_subsite_probs = {subsite: prob / total_prob for subsite, prob in subsite_probs.items()}
         return subsite_probs
     
+
+    @staticmethod
+    def _logit(p: float) -> float:
+        """Compute logit(p)."""
+        if not 0.0 < p < 1.0:
+            raise ValueError("Probability must be strictly between 0 and 1.")
+        return float(np.log(p / (1.0 - p)))
+
+
+    @staticmethod
+    def _sigmoid(x: float) -> float:
+        """Numerically stable sigmoid."""
+        if x >= 0:
+            z = np.exp(-x)
+            return float(1.0 / (1.0 + z))
+        z = np.exp(x)
+        return float(z / (1.0 + z))
+
+
     def normalize_subsite_probs_prior(
         self,
         joint_diagnosis_state_dists: np.ndarray,
         prior: dict[str, float] | None = None,
-        other_locations_tau: bool = None,
-        ) -> dict[str, float]:
-        """Compute normalized subsite probabilities from the joint diagnosis-and-state distributions.
+        outside_tau: float | None = None,
+        outside_sharpness: float = 3.0,
+    ) -> dict[str, float]:
+        """Compute normalized subsite probabilities.
+
+        If outside_tau is provided, an additional outside-HN rejection probability is
+        computed from the best head-and-neck explanation score.
 
         Parameters
         ----------
-        joint_diagnosis_state_dists : np.ndarray
+        joint_diagnosis_state_dists:
             Array containing P(Z|X) * P(X|component) for each mixture component.
-            The first axis indexes mixture components; all remaining axes span the
-            hidden state space.
 
-        prior : dict[str, float] | None, optional
-            Optional prior over subsites. If None, a uniform prior over subsites is used.
-            If provided, it should map each subsite name to a non-negative prior weight.
-            The prior does not need to be normalized.
+        prior:
+            Optional prior over modeled HN subsites. If None, a uniform prior is used.
+
+        outside_tau:
+            Threshold on log(max_s P(Z|s)) used for the outside-HN rejection model.
+            If None, no outside category is added.
+
+        outside_sharpness:
+            Controls how sharply outside probability changes around outside_tau.
 
         Returns
         -------
         dict[str, float]
-            Posterior probability per subsite after normalization.
+            Posterior probabilities over HN subsites, optionally including outside_key.
         """
+
         component_likelihoods = joint_diagnosis_state_dists.sum(
             axis=tuple(range(1, joint_diagnosis_state_dists.ndim))
         )
@@ -745,11 +771,6 @@ class LymphMixture(
 
         if prior is None:
             prior = {subsite: 1.0 for subsite in subsites}
-            if other_locations_tau is not None:
-                warnings.warn(
-                    "other_locations_tau provided without a prior. Ignoring other locations.",
-                    UserWarning,
-                )
         else:
             missing = [subsite for subsite in subsites if subsite not in prior]
             if missing:
@@ -757,30 +778,178 @@ class LymphMixture(
                     f"Prior is missing entries for the following subsites: {missing}"
                 )
 
-            negative = [subsite for subsite, value in prior.items() if value < 0]
+            negative = [key for key, value in prior.items() if value < 0]
             if negative:
                 raise ValueError(
-                    f"Prior contains negative values for the following subsites: {negative}"
+                    f"Prior contains negative values for the following entries: {negative}"
                 )
 
-        subsite_probs = {}
-        for subsite in subsites:
-            likelihood = (mixture_coefs[subsite] * component_likelihoods).sum()
-            subsite_probs[subsite] = likelihood * prior[subsite]
-        if other_locations_tau is not None and "other" in prior:
-            subsite_probs["other"] = np.exp(other_locations_tau) * prior["other"]
+        # Compute P(Z|s) for each HN subsite.
+        subsite_likelihoods: dict[str, float] = {}
+        hn_weights: dict[str, float] = {}
 
-        total_prob = sum(subsite_probs.values())
-        if total_prob <= 0:
+        for subsite in subsites:
+            likelihood = float((mixture_coefs[subsite] * component_likelihoods).sum())
+            subsite_likelihoods[subsite] = likelihood
+            hn_weights[subsite] = likelihood * prior[subsite]
+
+        hn_total = sum(hn_weights.values())
+        if hn_total <= 0:
             raise ValueError(
-                "Total subsite probability is zero; diagnosis likelihood under all "
-                "subsites vanished after applying the prior."
+                "Total HN probability is zero; diagnosis likelihood under all "
+                "HN subsites vanished after applying the prior."
             )
 
-        normalized_subsite_probs = {
-            subsite: prob / total_prob for subsite, prob in subsite_probs.items()
+        # Posterior over HN subsites conditional on the primary being in modeled HN sites.
+        hn_posterior = {
+            subsite: weight / hn_total
+            for subsite, weight in hn_weights.items()
         }
-        return normalized_subsite_probs
+
+        # If no outside-HN rejection is requested, return normal HN posterior.
+        if outside_tau is None:
+            return hn_posterior
+
+        # Compute best HN explanation score.
+        hn_lmax = max(subsite_likelihoods.values())
+        log_hn_lmax = np.log(hn_lmax) if hn_lmax > 0 else -np.inf
+
+        # Sigmoid rejection model:
+        # At log_hn_lmax == outside_tau, p_outside == outside_prior.
+        logit_prior = self._logit(prior["other"]) if "other" in prior else 0.0
+        if "other" not in prior:
+            logger.warning(
+                "No prior probability specified for outside category. The prediction might be overconfident."
+            )
+        rejection_score = (
+            logit_prior - outside_sharpness * (log_hn_lmax - outside_tau)
+        )
+        p_outside = self._sigmoid(rejection_score)
+
+        # Rescale HN posterior so total probability sums to one.
+        posterior = {
+            subsite: (1.0 - p_outside) * prob
+            for subsite, prob in hn_posterior.items()
+        }
+        posterior["other"] = p_outside
+
+        return posterior
+    
+    def normalize_subsite_probs_prior_extended(
+        self,
+        given_diagnosis: dict[str, Any],
+        prior: dict[str, float] | None = None,
+        outside_tau: float | None = None,
+        outside_sharpness: float = 3.0,
+    ) -> dict[str, float]:
+        """Compute normalized subsite probabilities.
+
+        If outside_tau is provided, an additional outside-HN rejection probability is
+        computed from the best head-and-neck explanation score.
+
+        Parameters
+        ----------
+        given_diagnosis:
+            Dictionary containing the given diagnosis information.
+
+        prior:
+            Optional prior over modeled HN subsites. If None, a uniform prior is used.
+
+        outside_tau:
+            Threshold on log(max_s P(Z|s)) used for the outside-HN rejection model.
+            If None, no outside category is added.
+
+        outside_sharpness:
+            Controls how sharply outside probability changes around outside_tau.
+
+        Returns
+        -------
+        dict[str, float]
+            Posterior probabilities over HN subsites, optionally including outside_key.
+        """
+        joint_diagnosis_state_dists = {}
+        joint_diagnosis_state_dists['early_nomidext'] = self.joint_diagnosis_state_dists(given_diagnosis, 'early', midext=False)
+        joint_diagnosis_state_dists['early_midext'] = self.joint_diagnosis_state_dists(given_diagnosis, 'early', midext=True)
+        joint_diagnosis_state_dists['late_nomidext'] = self.joint_diagnosis_state_dists(given_diagnosis, 'late', midext=False)
+        joint_diagnosis_state_dists['late_midext'] = self.joint_diagnosis_state_dists(given_diagnosis, 'late', midext=True)
+
+        component_likelihoods = {key : value.sum(
+            axis=tuple(range(1, value.ndim))
+        ) for key, value in joint_diagnosis_state_dists.items()}
+
+        mixture_coefs = self.get_mixture_coefs()
+        subsites = list(mixture_coefs.columns)
+
+        if prior is None:
+            prior = {subsite: 1.0 for subsite in subsites}
+        else:
+            missing = [subsite for subsite in subsites if subsite not in prior]
+            if missing:
+                raise ValueError(
+                    f"Prior is missing entries for the following subsites: {missing}"
+                )
+
+            negative = [key for key, value in prior.items() if value < 0]
+            if negative:
+                raise ValueError(
+                    f"Prior contains negative values for the following entries: {negative}"
+                )
+
+        # Compute P(Z|s) for each HN subsite.
+        subsite_likelihoods: {key: dict[str, float]} = {key: {} for key in joint_diagnosis_state_dists}
+        hn_weights: dict[str, dict[str, float]] = {key: {} for key in joint_diagnosis_state_dists}
+        hn_total = {}
+        for key in joint_diagnosis_state_dists:
+            for subsite in subsites:
+                likelihood = float((mixture_coefs[subsite] * component_likelihoods[key]).sum())
+                subsite_likelihoods[key][subsite] = likelihood
+                hn_weights[key][subsite] = likelihood * prior[subsite]
+
+            hn_total[key] = sum(hn_weights[key].values())
+            if hn_total[key] <= 0:
+                raise ValueError(
+                    "Total HN probability is zero; diagnosis likelihood under all "
+                    "HN subsites vanished after applying the prior."
+                )
+
+        # Posterior over HN subsites conditional on the primary being in modeled HN sites.
+        hn_posterior = {}
+        for key in joint_diagnosis_state_dists:  
+            hn_posterior[key] = {
+                subsite: weight / hn_total[key]
+                for subsite, weight in hn_weights[key].items()
+            }
+
+        # If no outside-HN rejection is requested, return normal HN posterior.
+        if outside_tau is None:
+            return hn_posterior
+
+        # Compute best HN explanation score.
+        hn_lmax = {}
+        log_hn_lmax = {}
+        hn_lmax = {key: max(subsite_likelihoods[key].values()) for key in joint_diagnosis_state_dists}
+        log_hn_lmax = {key: np.log(value) if value > 0 else -np.inf for key, value in hn_lmax.items()}
+        maximum_log_hn_lmax = max(log_hn_lmax.values())
+        # Sigmoid rejection model:
+        # At log_hn_lmax == outside_tau, p_outside == outside_prior.
+        logit_prior = self._logit(prior["other"]) if "other" in prior else 0.0
+        if "other" not in prior:
+            logger.warning(
+                "No prior probability specified for outside category. The prediction might be overconfident."
+            )
+        rejection_score = (
+            logit_prior - outside_sharpness * (maximum_log_hn_lmax - outside_tau)
+        )
+        p_outside = self._sigmoid(rejection_score)
+
+        # Rescale HN posterior so total probability sums to one.
+        posterior = {
+            subsite: (1.0 - p_outside) * prob
+            for subsite, prob in hn_posterior['early_nomidext'].items()
+        }
+        posterior["other"] = p_outside
+
+        return posterior, hn_posterior, log_hn_lmax
         
     def patient_component_likelihoods(
         self,
