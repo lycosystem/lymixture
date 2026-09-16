@@ -168,27 +168,46 @@ class LymphMixture(
             columns=self.subgroups.keys(),
         )
     
-    def midext_prob_builder(self) -> np.ndarray:
-        """Build an array of midext probabilities for each patient and component.
-        The result will match the number of patients in the model and assign for each patient
-        the correct midext/1-midext probability in column 0 if there is an extension and in column 1 if there is no extension.
-        if the extension is NaN both columns will have the midext and 1-midextprobability.
+    def midext_prob_builder(self) -> None:
+        """Build subgroup-specific extension weights in patient order.
+
+        Column 0 corresponds to extension; column 1 to no extension.
+        For unknown extension status, both possibilities are retained.
         """
-        self.all_midext_probs = {}
-        for subgroup_key, subgroup in self.subgroups.items():
-            self.all_midext_probs[subgroup_key] = subgroup.patient_data[MAP_EXT_COL].sum()/subgroup.patient_data[MAP_EXT_COL].notna().sum()
+        all_midext_probs = {}
+        weight_blocks = []
 
-        prob_array = np.empty(shape=(len(self.patient_data),2))
-        for i, patient in self.patient_data.iterrows():
-            prob_array[i,0] = self.all_midext_probs[patient[MAP_SUBGROUP_COL]]
-            prob_array[i,1] = 1 - prob_array[i,0]
-        mult_array = np.zeros(prob_array.shape)
-        extension_col = self.patient_data[MAP_EXT_COL]
-        is_nan = extension_col.isna()
+        for label, subgroup in self.subgroups.items():
+            extension = subgroup.patient_data[MAP_EXT_COL]
+            known = extension.notna()
 
-        mult_array[:,0] = np.where(is_nan, 1, extension_col.fillna(0).astype(int))
-        mult_array[:,1] = np.where(is_nan, 1, (~extension_col.astype(bool).fillna(True)).astype(int))
-        self.midext_prob_array = mult_array*prob_array
+            if not known.any():
+                raise ValueError(
+                    f"Cannot estimate midline-extension probability for "
+                    f"subgroup {label!r}: no known extension status."
+                )
+
+            p_ext = float(extension.loc[known].mean())
+            all_midext_probs[label] = p_ext
+
+            unknown = extension.isna().to_numpy(dtype=bool)
+            has_ext = extension.eq(True).fillna(False).to_numpy(dtype=bool)
+            no_ext = extension.eq(False).fillna(False).to_numpy(dtype=bool)
+
+            weights = np.column_stack(
+                (
+                    p_ext * (unknown | has_ext),
+                    (1.0 - p_ext) * (unknown | no_ext),
+                )
+            )
+            weight_blocks.append(weights)
+
+        self.all_midext_probs = all_midext_probs
+        self.midext_prob_array = (
+            np.concatenate(weight_blocks, axis=0)
+            if weight_blocks
+            else np.empty((0, 2), dtype=float)
+        )
 
     def get_mixture_coefs(
         self,
@@ -300,7 +319,12 @@ class LymphMixture(
         coefficients are in log-space for numerical stability.
         """
         mixture_coefs = np.zeros(self.get_mixture_coefs().shape).T
-
+        if new_resps is None:
+            new_resps = self.get_resps().to_numpy()
+            if log:
+                with np.errstate(divide="ignore"):
+                    new_resps = np.log(new_resps)
+            
         if log:
             log_resps = new_resps
             new_resps = np.exp(log_resps)
@@ -565,11 +589,25 @@ class LymphMixture(
             _set_resps(data=sub_data, resps=new_resps, **_kwargs)
             return
 
-        for subgroup in self.subgroups.values():  # noqa: PLR1704
+        for subgroup in self.subgroups.values():
             sub_data = subgroup.patient_data
-            sub_resp = new_resps[: len(sub_data)]
+
+            num_selected = (
+                len(sub_data)
+                if t_stage is None
+                else int((sub_data[MAP_T_COL] == t_stage).sum())
+            )
+
+            if num_selected == 0:
+                continue
+
+            if np.isscalar(new_resps):
+                sub_resp = new_resps
+            else:
+                sub_resp = new_resps[:num_selected]
+                new_resps = new_resps[num_selected:]
+
             _set_resps(data=sub_data, resps=sub_resp, **_kwargs)
-            new_resps = new_resps[len(sub_data) :]
 
     def load_patient_data(
         self,
@@ -587,6 +625,13 @@ class LymphMixture(
         self._mixture_coefs = None
         self._split_by = split_by
         grouped = patient_data.groupby(self._split_by)
+        # Remove subgroups that are absent from the new dataset.
+        current_labels = set(grouped.groups)
+        self.subgroups = {
+            label: subgroup
+            for label, subgroup in self.subgroups.items()
+            if label in current_labels
+        }
 
         for label, data in grouped:
             if label not in self.subgroups:
@@ -625,8 +670,9 @@ class LymphMixture(
         self.t_stage_indices = {stage: self.patient_data[MAP_T_COL] == stage for stage in t_stage_unique}
         
         # store all midext_probs for each ICD code
-        if issubclass(self._model_cls, lymph.models.Midline):
+        if self.split_midext:
             self.midext_prob_builder()
+            
     @property
     def patient_data(self) -> pd.DataFrame:
         """Return all patients stored in the individual subgroups."""
@@ -655,7 +701,7 @@ class LymphMixture(
         llhs = np.empty(shape_llhs)
         if issubclass(self._model_cls, lymph.models.Midline) and self.split_midext:
             for i, comp in enumerate(components):
-                component_llhs = np.empty((len(self.patient_data), 2))
+                component_llhs = np.zeros((len(self.patient_data), 2))
                 if t_stage is None:
                     sub_llhs = comp.patient_likelihoods(ext_noext_arrays=True)
                     component_llhs = sub_llhs
@@ -673,10 +719,17 @@ class LymphMixture(
                     t_idx = self.t_stage_indices[t]
                     sub_llhs = comp.patient_likelihoods(t_stage = t)
                     llhs[t_idx, i] = sub_llhs
+        # Keep only patients belonging to the requested T-stage.
+        # Their order matches get_resps() and repeat_mixture_coefs().
+        if t_stage is not None:
+            t_idx = self.t_stage_indices[t_stage]
+            llhs = llhs[t_idx]
+
         if component is not None:
             llhs = llhs[:, 0]
 
-        return np.log(llhs) if log else llhs
+        with np.errstate(divide="ignore"):
+            return np.log(llhs) if log else llhs
 
     def patient_mixture_likelihoods(
         self,
@@ -697,6 +750,8 @@ class LymphMixture(
         If ``marginalize`` is set to ``True``, the likelihoods are summed
         over the components, effectively marginalizing the components out of the
         likelihoods and yielding the incomplete data likelihood per patient.
+        With a component selected, return its mixture-weighted likelihood
+        for each patient. No component-axis reduction is needed.
         """
         component_patient_likelihood = self.patient_component_likelihoods(
             t_stage=t_stage,
@@ -721,7 +776,15 @@ class LymphMixture(
             llh = matching_mixture_coefs * component_patient_likelihood
 
         if marginalize:
-            return np.logaddexp.reduce(llh, axis=1) if log else np.sum(llh, axis=1)
+            # A selected component already gives one value per patient.
+            if llh.ndim == 1:
+                return llh
+
+            return (
+                np.logaddexp.reduce(llh, axis=1)
+                if log
+                else np.sum(llh, axis=1)
+            )
 
         return llh
 
@@ -747,28 +810,49 @@ class LymphMixture(
         component: int | None = None,
         *,
         log: bool = True,
+        include_mixture_coefs: bool = True,
     ) -> float:
-        """Compute the complete data likelihood of the model."""
-        llhs = self.patient_mixture_likelihoods(
+        """Compute the responsibility-weighted complete-data likelihood.
+
+        Set include_mixture_coefs=False to omit the mixture-weight term
+        when optimizing HMM parameters.
+        """
+        likelihood_fn = (
+            self.patient_mixture_likelihoods
+            if include_mixture_coefs
+            else self.patient_component_likelihoods
+        )
+        llhs = likelihood_fn(
             t_stage=t_stage,
             component=component,
             log=log,
         )
-        if component is not None:
-            llhs[(np.isinf(llhs)) & (self.repeat_mixture_coefs()[:,component] == 0)] = 0
-        else:
-            llhs[(np.isinf(llhs)) & (self.repeat_mixture_coefs() == 0)] = 0
+
         resps = self.get_resps(
             t_stage=t_stage,
             component=component,
         ).to_numpy()
+        
         if log:
-            with np.errstate(invalid="ignore"):
-                final_llh = resps * llhs
-            nan_condition = np.isnan(final_llh) & np.isinf(llhs) & (resps == 0)
-            final_llh[nan_condition] = 0
-            return np.sum(final_llh)
-        return np.prod(llhs**resps)
+            # Evaluate only terms with nonzero responsibility.
+            # This implements 0 * log(p) = 0, including when p = 0.
+            contributions = np.zeros_like(llhs, dtype=float)
+            np.multiply(
+                resps,
+                llhs,
+                out=contributions,
+                where=(resps != 0),
+            )
+            return np.sum(contributions)
+
+        contributions = np.ones_like(llhs, dtype=float)
+        np.power(
+            llhs,
+            resps,
+            out=contributions,
+            where=(resps != 0),
+        )
+        return np.prod(contributions)
 
     def likelihood(
         self,

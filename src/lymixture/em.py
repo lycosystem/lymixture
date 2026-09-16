@@ -176,7 +176,10 @@ def _neg_complete_component_llh(
     except ValueError:
         return np.inf
 
-    result = -model.complete_data_likelihood(component=component)
+    result = -model.complete_data_likelihood(
+        component=component,
+        include_mixture_coefs=False,
+    )
     logger.debug(f"Component {component} with params {params} has llh {result}")
     return result
 
@@ -195,7 +198,9 @@ def _neg_complete_component_llh_shared(
     except ValueError:
         return np.inf
 
-    result = -model.complete_data_likelihood()
+    result = -model.complete_data_likelihood(
+        include_mixture_coefs=False,
+    )
     logger.debug(f"Mixture model with params {params} has llh {result}")
     return result
 
@@ -214,6 +219,7 @@ def maximization(
 
     .. _EM algorithm: https://en.wikipedia.org/wiki/Expectation%E2%80%93maximization_algorithm
     """
+    model.set_resps(np.exp(log_resps))
     log_maxed_mix_coefs = model.infer_mixture_coefs(new_resps=log_resps, log=True)
     log_maxed_mix_coefs = utils.log_normalize(log_maxed_mix_coefs, axis=0)
     model.set_mixture_coefs(np.exp(log_maxed_mix_coefs))
@@ -396,7 +402,7 @@ def sample_fixed_mixture(
 
     ndim = len(current_params)
     nwalkers = 5 * ndim
-    perturbation = 1e-6 * RNG.randn(nwalkers, ndim)
+    perturbation = 1e-6 * RNG.standard_normal((nwalkers, ndim))
     backend = emcee.backends.HDFBackend(filename)
     if continue_sampling is False:
         starting_points = np.ones((nwalkers, ndim)) * current_params + perturbation
@@ -446,7 +452,8 @@ def sample_model_params(
         - The function initializes an `emcee.EnsembleSampler` for MCMC sampling and
           uses a multiprocessing pool to parallelize the computations.
     """
-    latent = latent or model.get_resps()
+    if latent is None:
+        latent = model.get_resps()
 
     model.set_resps(latent)
     model.set_mixture_coefs(model.infer_mixture_coefs())
@@ -454,7 +461,7 @@ def sample_model_params(
 
     ndim = len(current_params)
     nwalkers = 5 * ndim
-    perturbation = 1e-6 * abs(RNG.randn(nwalkers, ndim))
+    perturbation = 1e-6 * abs(RNG.standard_normal((nwalkers, ndim)))
     backend = emcee.backends.HDFBackend(filename)
 
     if continue_sampling is False:
@@ -546,7 +553,7 @@ def mh_latent_sampler_per_patient_2_component(
         ]
     ) / temp
     accept_ratio = np.exp(log_acceptance_ratio)
-    accept_thresholds = RNG.rand(len(accept_ratio))
+    accept_thresholds = RNG.random(len(accept_ratio))
     accepted_indices = np.where(accept_thresholds < accept_ratio)[0]
     accepted_position.iloc[accepted_indices, [0, 1]] = current_position.iloc[
         accepted_indices,
