@@ -885,6 +885,10 @@ class LymphMixture(
                 )
 
             if midext is None:
+                if self.split_midext and subgroup is not None:
+                    p_ext = self.all_midext_probs[subgroup]
+                    given_state_dist /= given_state_dist.sum(axis=(1, 2), keepdims=True)
+                    given_state_dist *= np.array([1.0 - p_ext, p_ext])[:, None, None]
                 given_state_dist = np.sum(given_state_dist, axis=0)
             else:
                 given_state_dist = given_state_dist[int(midext)]
